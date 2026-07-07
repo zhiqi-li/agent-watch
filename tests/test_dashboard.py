@@ -1,7 +1,10 @@
+import contextlib
 import importlib.util
 import io
 import json
 import pathlib
+import shlex
+import stat
 import subprocess
 import sys
 import tempfile
@@ -15,6 +18,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from agent_watch import core as aw
 from agent_watch import dashboard as ui
+from agent_watch import resume
 
 
 def make_row(key, state, project, provider="codex", when=None):
@@ -41,13 +45,38 @@ def make_row(key, state, project, provider="codex", when=None):
     }
 
 
+def write_resume_artifact(home, row):
+    session_id = row["session_id"]
+    if row["provider"] == "codex":
+        path = (
+            pathlib.Path(home)
+            / ".codex"
+            / "sessions"
+            / "2026"
+            / "07"
+            / "07"
+            / f"rollout-test-{session_id}.jsonl"
+        )
+        item = {"type": "session_meta", "payload": {"id": session_id}}
+    else:
+        path = pathlib.Path(home) / ".claude" / "projects" / "-work-demo" / f"{session_id}.jsonl"
+        item = {"type": "user", "sessionId": session_id}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(item) + "\n")
+    return path
+
+
 class DashboardTests(unittest.TestCase):
     def test_readme_screenshot_is_reproducible_synthetic_data(self):
         committed = ROOT / "docs" / "agent-watch-demo.svg"
         with tempfile.TemporaryDirectory() as tmp:
             generated = pathlib.Path(tmp) / "demo.svg"
             run = subprocess.run(
-                [sys.executable, str(ROOT / "scripts" / "render-demo.py"), str(generated)],
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "render-demo.py"),
+                    str(generated),
+                ],
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -57,6 +86,7 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(generated.read_bytes(), committed.read_bytes())
         text = committed.read_text()
         self.assertIn("checkout-api", text)
+        self.assertIn("Exited&#160;sessions", text)
         self.assertNotIn("/root", text)
         self.assertNotIn("zhiqi-li", text)
         self.assertNotIn("cdnjs.cloudflare.com", text)
@@ -81,11 +111,44 @@ class DashboardTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp) / "rollout.jsonl"
             records = [
-                {"type": "event_msg", "timestamp": "2026-01-01T00:00:00Z", "payload": {"type": "user_message", "message": "VISIBLE_USER"}},
-                {"type": "response_item", "timestamp": "2026-01-01T00:00:01Z", "payload": {"type": "reasoning", "summary": "UNIQUE_SECRET_REASONING"}},
-                {"type": "response_item", "timestamp": "2026-01-01T00:00:02Z", "payload": {"type": "custom_tool_call", "name": "exec", "input": "UNIQUE_SECRET_COMMAND"}},
-                {"type": "response_item", "timestamp": "2026-01-01T00:00:03Z", "payload": {"type": "custom_tool_call_output", "output": "UNIQUE_SECRET_OUTPUT"}},
-                {"type": "event_msg", "timestamp": "2026-01-01T00:00:04Z", "payload": {"type": "agent_message", "message": "VISIBLE_ASSISTANT"}},
+                {
+                    "type": "event_msg",
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "payload": {"type": "user_message", "message": "VISIBLE_USER"},
+                },
+                {
+                    "type": "response_item",
+                    "timestamp": "2026-01-01T00:00:01Z",
+                    "payload": {
+                        "type": "reasoning",
+                        "summary": "UNIQUE_SECRET_REASONING",
+                    },
+                },
+                {
+                    "type": "response_item",
+                    "timestamp": "2026-01-01T00:00:02Z",
+                    "payload": {
+                        "type": "custom_tool_call",
+                        "name": "exec",
+                        "input": "UNIQUE_SECRET_COMMAND",
+                    },
+                },
+                {
+                    "type": "response_item",
+                    "timestamp": "2026-01-01T00:00:03Z",
+                    "payload": {
+                        "type": "custom_tool_call_output",
+                        "output": "UNIQUE_SECRET_OUTPUT",
+                    },
+                },
+                {
+                    "type": "event_msg",
+                    "timestamp": "2026-01-01T00:00:04Z",
+                    "payload": {
+                        "type": "agent_message",
+                        "message": "VISIBLE_ASSISTANT",
+                    },
+                },
             ]
             path.write_text("\n".join(json.dumps(item) for item in records) + "\n")
             preview = ui.extract_codex_preview(path)
@@ -100,10 +163,52 @@ class DashboardTests(unittest.TestCase):
             path = pathlib.Path(tmp) / "session.jsonl"
             session_id = "session-123"
             records = [
-                {"type": "user", "sessionId": session_id, "timestamp": "2026-01-01T00:00:00Z", "message": {"role": "user", "content": "VISIBLE_USER"}},
-                {"type": "user", "sessionId": session_id, "timestamp": "2026-01-01T00:00:01Z", "message": {"role": "user", "content": [{"type": "tool_result", "content": "UNIQUE_SECRET_RESULT"}]}},
-                {"type": "assistant", "sessionId": session_id, "isSidechain": True, "timestamp": "2026-01-01T00:00:02Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "UNIQUE_SECRET_SIDECHAIN"}]}},
-                {"type": "assistant", "sessionId": session_id, "timestamp": "2026-01-01T00:00:03Z", "message": {"role": "assistant", "content": [{"type": "thinking", "thinking": "UNIQUE_SECRET_THINKING"}, {"type": "text", "text": "VISIBLE_ASSISTANT"}, {"type": "tool_use", "name": "Bash", "input": {"command": "UNIQUE_SECRET_COMMAND"}}]}},
+                {
+                    "type": "user",
+                    "sessionId": session_id,
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "message": {"role": "user", "content": "VISIBLE_USER"},
+                },
+                {
+                    "type": "user",
+                    "sessionId": session_id,
+                    "timestamp": "2026-01-01T00:00:01Z",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {"type": "tool_result", "content": "UNIQUE_SECRET_RESULT"}
+                        ],
+                    },
+                },
+                {
+                    "type": "assistant",
+                    "sessionId": session_id,
+                    "isSidechain": True,
+                    "timestamp": "2026-01-01T00:00:02Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "text", "text": "UNIQUE_SECRET_SIDECHAIN"}
+                        ],
+                    },
+                },
+                {
+                    "type": "assistant",
+                    "sessionId": session_id,
+                    "timestamp": "2026-01-01T00:00:03Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "thinking", "thinking": "UNIQUE_SECRET_THINKING"},
+                            {"type": "text", "text": "VISIBLE_ASSISTANT"},
+                            {
+                                "type": "tool_use",
+                                "name": "Bash",
+                                "input": {"command": "UNIQUE_SECRET_COMMAND"},
+                            },
+                        ],
+                    },
+                },
             ]
             path.write_text("\n".join(json.dumps(item) for item in records) + "\n")
             preview = ui.extract_claude_preview(path, session_id)
@@ -134,7 +239,15 @@ class DashboardTests(unittest.TestCase):
             outside.write_text(
                 json.dumps({"type": "session_meta", "payload": {"id": session_id}})
                 + "\n"
-                + json.dumps({"type": "event_msg", "payload": {"type": "user_message", "message": "SHOULD_NOT_LOAD"}})
+                + json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "user_message",
+                            "message": "SHOULD_NOT_LOAD",
+                        },
+                    }
+                )
                 + "\n"
             )
             (root / f"rollout-{session_id}.jsonl").symlink_to(outside)
@@ -156,7 +269,10 @@ class DashboardTests(unittest.TestCase):
                     json.dumps(item)
                     for item in (
                         {"type": "session_meta", "payload": {"id": session_id}},
-                        {"type": "event_msg", "payload": {"type": "user_message", "message": "VISIBLE"}},
+                        {
+                            "type": "event_msg",
+                            "payload": {"type": "user_message", "message": "VISIBLE"},
+                        },
                     )
                 )
                 + "\n"
@@ -276,11 +392,14 @@ class DashboardTests(unittest.TestCase):
             completed([], 0, stdout="", stderr=""),
             completed([], 0, stdout="", stderr=""),
         ]
-        with mock.patch.dict(
-            ui.os.environ,
-            {"TMUX": "/tmp/tmux-0/default,123,0", "TMUX_PANE": "%dash"},
-            clear=False,
-        ), mock.patch.object(ui.subprocess, "run", side_effect=results) as run:
+        with (
+            mock.patch.dict(
+                ui.os.environ,
+                {"TMUX": "/tmp/tmux-0/default,123,0", "TMUX_PANE": "%dash"},
+                clear=False,
+            ),
+            mock.patch.object(ui.subprocess, "run", side_effect=results) as run,
+        ):
             ok, message = ui.switch_to_session(row)
         self.assertTrue(ok, message)
         self.assertEqual(
@@ -318,11 +437,14 @@ class DashboardTests(unittest.TestCase):
             completed([], 0, stdout="1:0.0\n", stderr=""),
             completed([], 0, stdout="/dev/pts/7|%dash\n/dev/pts/8|%dash\n", stderr=""),
         ]
-        with mock.patch.dict(
-            ui.os.environ,
-            {"TMUX": "/tmp/tmux-0/default,123,0", "TMUX_PANE": "%dash"},
-            clear=False,
-        ), mock.patch.object(ui.subprocess, "run", side_effect=results):
+        with (
+            mock.patch.dict(
+                ui.os.environ,
+                {"TMUX": "/tmp/tmux-0/default,123,0", "TMUX_PANE": "%dash"},
+                clear=False,
+            ),
+            mock.patch.object(ui.subprocess, "run", side_effect=results),
+        ):
             ok, message = ui.switch_to_session(row)
         self.assertFalse(ok)
         self.assertIn("Multiple clients", message)
@@ -331,15 +453,18 @@ class DashboardTests(unittest.TestCase):
         row = make_row("agent", "running", "agent")
         row["tmux_socket"] = "/tmp/custom socket"
         completed = ui.subprocess.CompletedProcess
-        with mock.patch.dict(
-            ui.os.environ,
-            {"TMUX": "/tmp/tmux-0/default,123,0", "TMUX_PANE": "%dash"},
-            clear=False,
-        ), mock.patch.object(
-            ui.subprocess,
-            "run",
-            return_value=completed([], 0, stdout="1:0.0\n", stderr=""),
-        ) as run:
+        with (
+            mock.patch.dict(
+                ui.os.environ,
+                {"TMUX": "/tmp/tmux-0/default,123,0", "TMUX_PANE": "%dash"},
+                clear=False,
+            ),
+            mock.patch.object(
+                ui.subprocess,
+                "run",
+                return_value=completed([], 0, stdout="1:0.0\n", stderr=""),
+            ) as run,
+        ):
             ok, message = ui.switch_to_session(row)
         self.assertFalse(ok)
         self.assertIn("another tmux server", message)
@@ -356,9 +481,10 @@ class DashboardTests(unittest.TestCase):
         environment = dict(ui.os.environ)
         environment.pop("TMUX", None)
         environment.pop("TMUX_PANE", None)
-        with mock.patch.dict(ui.os.environ, environment, clear=True), mock.patch.object(
-            ui.subprocess, "run", side_effect=results
-        ) as run:
+        with (
+            mock.patch.dict(ui.os.environ, environment, clear=True),
+            mock.patch.object(ui.subprocess, "run", side_effect=results) as run,
+        ):
             ok, message = ui.switch_to_session(row)
         self.assertTrue(ok, message)
         self.assertEqual(
@@ -388,14 +514,455 @@ class DashboardTests(unittest.TestCase):
                 make_row("ready", "ready", "ready"),
                 make_row("input", "needs_input", "input"),
                 make_row("error", "error", "error"),
+                make_row("gone", "exited", "gone"),
             ]
         )
         ordered = ui.visible_sessions(snapshot)
-        self.assertEqual([row["session_key"] for row in ordered], ["input", "error", "ready", "run"])
+        self.assertEqual(
+            [row["session_key"] for row in ordered], ["input", "error", "ready", "run"]
+        )
         attention = ui.visible_sessions(snapshot, "attention")
-        self.assertEqual([row["session_key"] for row in attention], ["input", "error", "ready"])
+        self.assertEqual(
+            [row["session_key"] for row in attention], ["input", "error", "ready"]
+        )
         searched = ui.visible_sessions(snapshot, query="READY")
         self.assertEqual([row["session_key"] for row in searched], ["ready"])
+        view = ui.DashboardView(snapshot)
+        self.assertEqual(view.rows[-1]["session_key"], ui.EXITED_SUMMARY_KEY)
+        self.assertEqual(view.rows[-1]["exit_count"], 1)
+
+    def test_exited_history_navigation_and_newest_first(self):
+        now = time.time()
+        snapshot = ui.DashboardSnapshot(
+            sessions=[
+                make_row("run", "running", "run", when=now),
+                make_row("old", "exited", "old", when=now - 200),
+                make_row("new", "exited", "new", when=now - 10),
+            ]
+        )
+        view = ui.DashboardView(snapshot)
+        self.assertEqual(
+            [row["session_key"] for row in view.rows],
+            ["run", ui.EXITED_SUMMARY_KEY],
+        )
+        view.jump(len(view.rows) - 1)
+        self.assertEqual(ui.handle_key(view, "enter", "", 10), "")
+        self.assertTrue(view.history_mode)
+        self.assertEqual([row["session_key"] for row in view.rows], ["new", "old"])
+        self.assertEqual(ui.handle_key(view, "enter", "", 10), "resume")
+        self.assertEqual(ui.handle_key(view, "escape", "", 10), "")
+        self.assertFalse(view.history_mode)
+        self.assertEqual(view.selected["session_key"], ui.EXITED_SUMMARY_KEY)
+
+    @unittest.skipUnless(ui.RICH_AVAILABLE, "rich unavailable")
+    def test_main_render_collapses_exited_sessions(self):
+        from rich.console import Console
+
+        snapshot = ui.DashboardSnapshot(
+            sessions=[
+                make_row("run", "running", "active-project"),
+                make_row("gone", "exited", "hidden-exited-project"),
+            ],
+            daemon_alive=True,
+        )
+        output = io.StringIO()
+        console = Console(
+            file=output, width=120, height=32, force_terminal=False, color_system=None
+        )
+        console.print(ui.render_dashboard(ui.DashboardView(snapshot), 120, 32))
+        rendered = output.getvalue()
+        self.assertIn("Exited sessions", rendered)
+        self.assertIn("1 retained", rendered)
+        self.assertNotIn("hidden-exited-project", rendered)
+
+    def test_resume_commands_and_temporary_ids(self):
+        codex = make_row("abc-session", "exited", "demo")
+        claude = make_row("def-session", "exited", "demo", provider="claude")
+        self.assertEqual(
+            resume.resume_command(codex), ["codex", "resume", "abc-session"]
+        )
+        self.assertEqual(
+            resume.resume_command(claude), ["claude", "--resume", "def-session"]
+        )
+        temporary = dict(codex, session_id="pid-10-20")
+        available, reason = resume.resume_availability(temporary)
+        self.assertFalse(available)
+        self.assertIn("Temporary", reason)
+        with self.assertRaises(ValueError):
+            resume.resume_command(temporary)
+        with mock.patch.object(resume.subprocess, "run") as run:
+            ok, message = resume.resume_in_new_tmux(temporary)
+        self.assertFalse(ok)
+        self.assertIn("Temporary", message)
+        run.assert_not_called()
+
+    def test_resume_resolves_relative_path_entry_before_changing_cwd(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            dashboard_cwd = root / "dashboard"
+            target_cwd = root / "target"
+            trusted = dashboard_cwd / "bin" / "codex"
+            untrusted = target_cwd / "bin" / "codex"
+            trusted.parent.mkdir(parents=True)
+            untrusted.parent.mkdir(parents=True)
+            trusted.write_text("#!/bin/sh\nexit 0\n")
+            untrusted.write_text("#!/bin/sh\nexit 99\n")
+            trusted.chmod(0o700)
+            untrusted.chmod(0o700)
+            with contextlib.chdir(dashboard_cwd), mock.patch.dict(
+                resume.os.environ, {"PATH": "bin"}, clear=False
+            ):
+                resolved = resume._absolute_executable("codex")
+            self.assertEqual(resolved, str(trusted.resolve()))
+            self.assertNotEqual(resolved, str(untrusted.resolve()))
+
+    def test_resume_creates_new_tmux_session_and_ignores_old_location(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            cwd = root / "project"
+            home = root / "home"
+            state = root / "state"
+            cwd.mkdir()
+            row = make_row("abc-session", "exited", "demo")
+            row.update(
+                {
+                    "cwd": str(cwd),
+                    "tmux_socket": "/tmp/stale-server",
+                    "tmux_target": "stale:9.9",
+                    "pane_id": "%999",
+                }
+            )
+            write_resume_artifact(home, row)
+            completed = subprocess.CompletedProcess
+            results = [
+                completed([], 0, stdout="/dev/pts/7|%42\n", stderr=""),
+                completed([], 1, stdout="", stderr="missing"),
+                completed([], 0, stdout="", stderr=""),
+                completed([], 0, stdout="", stderr=""),
+                completed([], 0, stdout="0|0|flock\n", stderr=""),
+                completed([], 0, stdout="", stderr=""),
+                completed([], 0, stdout="", stderr=""),
+            ]
+            with (
+                mock.patch.dict(
+                    resume.os.environ,
+                    {"TMUX": "/tmp/tmux-0/default,123,0", "TMUX_PANE": "%42"},
+                    clear=False,
+                ),
+                mock.patch.object(
+                    resume,
+                    "_absolute_executable",
+                    side_effect=lambda name: f"/usr/bin/{name}",
+                ),
+                mock.patch.object(resume, "_session_is_active", return_value=False),
+                mock.patch.object(
+                    resume, "_resume_lock_busy", side_effect=[False, True]
+                ),
+                mock.patch.object(resume.subprocess, "run", side_effect=results) as run,
+            ):
+                ok, message = resume.resume_in_new_tmux(
+                    row, state_dir=state, home=home
+                )
+            self.assertTrue(ok, message)
+            name = resume.resume_tmux_name(row)
+            lock_dir = state / "resume-locks"
+            lock_file = lock_dir / f"codex-{name.rsplit('-', 1)[-1]}.lock"
+            self.assertEqual(stat.S_IMODE(lock_dir.stat().st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(lock_file.stat().st_mode), 0o600)
+            create_calls = [
+                call for call in run.call_args_list if "new-session" in call.args[0]
+            ]
+            self.assertEqual(len(create_calls), 1)
+            self.assertEqual(
+                create_calls[0].args[0],
+                [
+                    "tmux",
+                    "-S",
+                    "/tmp/tmux-0/default",
+                    "new-session",
+                    "-d",
+                    "-s",
+                    name,
+                    "-c",
+                    str(cwd),
+                    shlex.join(
+                        [
+                            "/usr/bin/flock",
+                            "-n",
+                            str(
+                                lock_file
+                            ),
+                            "/usr/bin/codex",
+                            "resume",
+                            "abc-session",
+                        ]
+                    ),
+                ],
+            )
+            all_commands = repr([call.args[0] for call in run.call_args_list])
+            self.assertNotIn("stale-server", all_commands)
+            self.assertNotIn("stale:9.9", all_commands)
+            self.assertNotIn("%999", all_commands)
+            switch_calls = [
+                call for call in run.call_args_list if "switch-client" in call.args[0]
+            ]
+            self.assertEqual(len(switch_calls), 1)
+            self.assertEqual(
+                switch_calls[0].args[0],
+                [
+                    "tmux",
+                    "-S",
+                    "/tmp/tmux-0/default",
+                    "switch-client",
+                    "-c",
+                    "/dev/pts/7",
+                    "-t",
+                    f"={name}",
+                ],
+            )
+            self.assertIn("prefix + L", run.call_args_list[-1].args[0][-1])
+
+    def test_resume_reuses_existing_named_tmux_session(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            cwd = root / "project"
+            home = root / "home"
+            state = root / "state"
+            cwd.mkdir()
+            row = make_row("existing-session", "exited", "demo", provider="claude")
+            row["cwd"] = str(cwd)
+            write_resume_artifact(home, row)
+            completed = subprocess.CompletedProcess
+            results = [
+                completed([], 0, stdout="/dev/pts/9|%21\n", stderr=""),
+                completed([], 0, stdout="", stderr=""),
+                completed([], 0, stdout="0|0|flock\n", stderr=""),
+                completed([], 0, stdout="", stderr=""),
+                completed([], 0, stdout="", stderr=""),
+            ]
+            with (
+                mock.patch.dict(
+                    resume.os.environ,
+                    {"TMUX": "/tmp/tmux-0/default,123,0", "TMUX_PANE": "%21"},
+                    clear=False,
+                ),
+                mock.patch.object(
+                    resume,
+                    "_absolute_executable",
+                    side_effect=lambda name: f"/usr/bin/{name}",
+                ),
+                mock.patch.object(resume, "_session_is_active", return_value=False),
+                mock.patch.object(resume, "_resume_lock_busy", return_value=True),
+                mock.patch.object(resume.subprocess, "run", side_effect=results) as run,
+            ):
+                ok, message = resume.resume_in_new_tmux(
+                    row, state_dir=state, home=home
+                )
+            self.assertTrue(ok, message)
+            self.assertFalse(
+                any("new-session" in call.args[0] for call in run.call_args_list)
+            )
+            switch = next(
+                call.args[0]
+                for call in run.call_args_list
+                if "switch-client" in call.args[0]
+            )
+            self.assertEqual(switch[-1], f"={resume.resume_tmux_name(row)}")
+
+    def test_resume_requires_owned_conversation_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            cwd = root / "project"
+            home = root / "home"
+            cwd.mkdir()
+            home.mkdir()
+            row = make_row("missing-history", "exited", "demo")
+            row["cwd"] = str(cwd)
+            outside = root / "outside.jsonl"
+            outside.write_text(
+                json.dumps(
+                    {"type": "session_meta", "payload": {"id": row["session_id"]}}
+                )
+                + "\n"
+            )
+            linked = (
+                home
+                / ".codex"
+                / "sessions"
+                / "2026"
+                / "07"
+                / "07"
+                / f"rollout-test-{row['session_id']}.jsonl"
+            )
+            linked.parent.mkdir(parents=True)
+            linked.symlink_to(outside)
+            with mock.patch.object(
+                resume,
+                "_absolute_executable",
+                side_effect=lambda name: f"/usr/bin/{name}",
+            ):
+                available, reason = resume.resume_availability(row, home=home)
+            self.assertFalse(available)
+            self.assertIn("Conversation data", reason)
+
+    def test_resume_replaces_dead_named_session_before_starting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            cwd = root / "project"
+            home = root / "home"
+            state = root / "state"
+            cwd.mkdir()
+            row = make_row("dead-session", "exited", "demo")
+            row["cwd"] = str(cwd)
+            write_resume_artifact(home, row)
+            completed = subprocess.CompletedProcess
+            results = [
+                completed([], 0, stdout="/dev/pts/3|%31\n", stderr=""),
+                completed([], 0, stdout="", stderr=""),
+                completed([], 0, stdout="1|1|codex\n", stderr=""),
+                completed([], 0, stdout="", stderr=""),
+                completed([], 0, stdout="", stderr=""),
+                completed([], 0, stdout="", stderr=""),
+                completed([], 0, stdout="0|0|flock\n", stderr=""),
+                completed([], 0, stdout="", stderr=""),
+                completed([], 0, stdout="", stderr=""),
+            ]
+            with (
+                mock.patch.dict(
+                    resume.os.environ,
+                    {"TMUX": "/tmp/tmux-0/default,123,0", "TMUX_PANE": "%31"},
+                    clear=False,
+                ),
+                mock.patch.object(
+                    resume,
+                    "_absolute_executable",
+                    side_effect=lambda name: f"/usr/bin/{name}",
+                ),
+                mock.patch.object(resume, "_session_is_active", return_value=False),
+                mock.patch.object(
+                    resume, "_resume_lock_busy", side_effect=[False, True]
+                ),
+                mock.patch.object(resume.subprocess, "run", side_effect=results) as run,
+            ):
+                ok, message = resume.resume_in_new_tmux(
+                    row, state_dir=state, home=home
+                )
+            self.assertTrue(ok, message)
+            commands = [call.args[0] for call in run.call_args_list]
+            self.assertEqual(sum("kill-session" in command for command in commands), 1)
+            self.assertEqual(sum("new-session" in command for command in commands), 1)
+
+    def test_resume_refuses_session_already_running_elsewhere(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            cwd = root / "project"
+            home = root / "home"
+            cwd.mkdir()
+            row = make_row("already-running", "exited", "demo")
+            row["cwd"] = str(cwd)
+            write_resume_artifact(home, row)
+            with (
+                mock.patch.object(
+                    resume,
+                    "_absolute_executable",
+                    side_effect=lambda name: f"/usr/bin/{name}",
+                ),
+                mock.patch.object(resume, "_session_is_active", return_value=True),
+                mock.patch.object(resume.subprocess, "run") as run,
+            ):
+                ok, message = resume.resume_in_new_tmux(row, home=home)
+            self.assertFalse(ok)
+            self.assertIn("already running", message)
+            run.assert_not_called()
+
+    def test_resume_reports_provider_that_exits_immediately(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            cwd = root / "project"
+            home = root / "home"
+            state = root / "state"
+            cwd.mkdir()
+            row = make_row("bad-resume", "exited", "demo")
+            row["cwd"] = str(cwd)
+            write_resume_artifact(home, row)
+            completed = subprocess.CompletedProcess
+            results = [
+                completed([], 0, stdout="/dev/pts/4|%41\n", stderr=""),
+                completed([], 1, stdout="", stderr="missing"),
+                completed([], 0, stdout="", stderr=""),
+                completed([], 1, stdout="", stderr="missing"),
+            ]
+            with (
+                mock.patch.dict(
+                    resume.os.environ,
+                    {"TMUX": "/tmp/tmux-0/default,123,0", "TMUX_PANE": "%41"},
+                    clear=False,
+                ),
+                mock.patch.object(
+                    resume,
+                    "_absolute_executable",
+                    side_effect=lambda name: f"/usr/bin/{name}",
+                ),
+                mock.patch.object(resume, "_session_is_active", return_value=False),
+                mock.patch.object(resume, "_resume_lock_busy", return_value=False),
+                mock.patch.object(resume.subprocess, "run", side_effect=results) as run,
+            ):
+                ok, message = resume.resume_in_new_tmux(
+                    row, state_dir=state, home=home
+                )
+            self.assertFalse(ok)
+            self.assertIn("could not resume", message)
+            self.assertFalse(
+                any("switch-client" in call.args[0] for call in run.call_args_list)
+            )
+
+    def test_resume_outside_tmux_attaches_new_session(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            cwd = root / "project"
+            home = root / "home"
+            state = root / "state"
+            cwd.mkdir()
+            row = make_row("outside-tmux", "exited", "demo", provider="claude")
+            row["cwd"] = str(cwd)
+            write_resume_artifact(home, row)
+            completed = subprocess.CompletedProcess
+            results = [
+                completed([], 1, stdout="", stderr="missing"),
+                completed([], 0, stdout="", stderr=""),
+                completed([], 0, stdout="", stderr=""),
+                completed([], 0, stdout="0|0|flock\n", stderr=""),
+                completed([], 0, stdout=None, stderr=None),
+            ]
+            environment = dict(resume.os.environ)
+            environment.pop("TMUX", None)
+            environment.pop("TMUX_PANE", None)
+            with (
+                mock.patch.dict(resume.os.environ, environment, clear=True),
+                mock.patch.object(
+                    resume,
+                    "_absolute_executable",
+                    side_effect=lambda name: f"/usr/bin/{name}",
+                ),
+                mock.patch.object(resume, "_session_is_active", return_value=False),
+                mock.patch.object(
+                    resume, "_resume_lock_busy", side_effect=[False, True]
+                ),
+                mock.patch.object(resume.subprocess, "run", side_effect=results) as run,
+            ):
+                ok, message = resume.resume_in_new_tmux(
+                    row, state_dir=state, home=home
+                )
+            self.assertTrue(ok, message)
+            attach = next(
+                call
+                for call in run.call_args_list
+                if "attach-session" in call.args[0]
+            )
+            self.assertEqual(
+                attach.args[0][-1], f"={resume.resume_tmux_name(row)}"
+            )
+            self.assertFalse(attach.kwargs["capture_output"])
 
     def test_selection_survives_refresh_and_reorder(self):
         first = ui.DashboardSnapshot(
@@ -481,7 +1048,9 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(len(activity_lines), 2)
             self.assertEqual(len({line.index("updated") for line in activity_lines}), 1)
             self.assertTrue(
-                all(line[line.index("updated") - 1].isspace() for line in activity_lines)
+                all(
+                    line[line.index("updated") - 1].isspace() for line in activity_lines
+                )
             )
 
     def test_key_handling(self):

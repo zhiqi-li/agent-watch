@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Claude-inspired terminal dashboard for agent-watch.
 
-The module is intentionally read-only: it opens the monitor database with
-SQLite's mode=ro and never participates in daemon/outbox writes.
+Database access is intentionally read-only: the dashboard opens monitor state
+with SQLite's mode=ro and never participates in daemon/outbox writes. An
+explicit resume action may start an agent in a new tmux session.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ import unicodedata
 from typing import Any, Mapping, Sequence
 
 from . import __version__
+from .resume import resume_availability, resume_in_new_tmux
 
 try:
     from rich import box
@@ -75,7 +77,8 @@ STATE_META: dict[str, tuple[str, str, str, int]] = {
 }
 
 FILTERS = ("all", "attention", "running")
-FILTER_LABELS = {"all": "All", "attention": "Attention", "running": "Running"}
+FILTER_LABELS = {"all": "Current", "attention": "Attention", "running": "Running"}
+EXITED_SUMMARY_KEY = "__agent_watch_exited_sessions__"
 
 ANSI_RE = re.compile(
     r"(?:\x1B\][^\x07]*(?:\x07|\x1B\\)|\x1B\[[0-?]*[ -/]*[@-~]|\x1B[@-_])"
@@ -119,7 +122,9 @@ def load_snapshot(
     heartbeat_max_age: float = 20.0,
     activity_stale_seconds: float = 600.0,
 ) -> DashboardSnapshot:
-    snapshot = DashboardSnapshot(activity_stale_seconds=max(30.0, activity_stale_seconds))
+    snapshot = DashboardSnapshot(
+        activity_stale_seconds=max(30.0, activity_stale_seconds)
+    )
     path = state_dir / "state.sqlite3"
     if not path.exists():
         snapshot.error = "State database not found; start agent-watch daemon first."
@@ -375,11 +380,19 @@ def extract_codex_preview(path: pathlib.Path) -> dict[str, dict[str, Any]]:
             continue
         timestamp = item.get("timestamp")
         payload_type = str(payload.get("type") or "")
-        if item_type == "event_msg" and payload_type == "user_message" and "user" not in preview:
+        if (
+            item_type == "event_msg"
+            and payload_type == "user_message"
+            and "user" not in preview
+        ):
             entry = context_entry(payload.get("message"), timestamp)
             if entry:
                 preview["user"] = entry
-        elif item_type == "event_msg" and payload_type == "agent_message" and "assistant" not in preview:
+        elif (
+            item_type == "event_msg"
+            and payload_type == "agent_message"
+            and "assistant" not in preview
+        ):
             entry = context_entry(payload.get("message"), timestamp)
             if entry:
                 preview["assistant"] = entry
@@ -528,7 +541,9 @@ class ConversationPreviewLoader:
             return False
         return False
 
-    def _find_codex(self, row: Mapping[str, Any], session_id: str) -> pathlib.Path | None:
+    def _find_codex(
+        self, row: Mapping[str, Any], session_id: str
+    ) -> pathlib.Path | None:
         pid = int(row.get("pid") or 0)
         if pid > 0:
             for fd in pathlib.Path(f"/proc/{pid}/fd").glob("*"):
@@ -616,9 +631,7 @@ class ConversationPreviewLoader:
             if provider == "codex":
                 preview = extract_codex_preview(path)
             elif provider == "claude":
-                preview = extract_claude_preview(
-                    path, str(row.get("session_id") or "")
-                )
+                preview = extract_claude_preview(path, str(row.get("session_id") or ""))
         if cached and path == cached.path:
             merged = dict(cached.preview)
             merged.update(preview)
@@ -641,9 +654,7 @@ def state_visual(state: str, spinner_index: int = 0) -> tuple[str, str, str]:
     return symbol, label, color
 
 
-def last_activity_age(
-    row: Mapping[str, Any], now: float | None = None
-) -> float | None:
+def last_activity_age(row: Mapping[str, Any], now: float | None = None) -> float | None:
     value = float(row.get("last_activity_at") or 0)
     if value <= 0:
         return None
@@ -678,12 +689,15 @@ def session_priority(
 def visible_sessions(
     snapshot: DashboardSnapshot, filter_mode: str = "all", query: str = ""
 ) -> list[dict[str, Any]]:
-    rows = list(snapshot.sessions)
+    # Exited sessions are retained as resumable history, not current work. They
+    # live behind the dashboard's history entry instead of competing with
+    # sessions that can still require attention.
+    rows = [row for row in snapshot.sessions if row.get("state") != "exited"]
     if filter_mode == "attention":
         rows = [
             row
             for row in rows
-            if row.get("state") in {"needs_input", "error", "ready", "exited"}
+            if row.get("state") in {"needs_input", "error", "ready"}
             or is_stalled(row, snapshot.activity_stale_seconds)
         ]
     elif filter_mode == "running":
@@ -696,13 +710,66 @@ def visible_sessions(
             if query
             in " ".join(
                 sanitize(row.get(field, ""), 1000).lower()
-                for field in ("provider", "name", "cwd", "tmux_target", "state")
+                for field in (
+                    "provider",
+                    "name",
+                    "cwd",
+                    "tmux_target",
+                    "session_id",
+                    "state",
+                )
             )
         ]
     return sorted(
         rows,
         key=lambda row: session_priority(row, snapshot.activity_stale_seconds),
     )
+
+
+def exited_sessions(
+    snapshot: DashboardSnapshot, query: str = ""
+) -> list[dict[str, Any]]:
+    """Return retained exited sessions, newest exit first."""
+    rows = [row for row in snapshot.sessions if row.get("state") == "exited"]
+    query = query.strip().lower()
+    if query:
+        rows = [
+            row
+            for row in rows
+            if query
+            in " ".join(
+                sanitize(row.get(field, ""), 1000).lower()
+                for field in ("provider", "name", "cwd", "session_id", "state")
+            )
+        ]
+    return sorted(
+        rows,
+        key=lambda row: (
+            -float(row.get("state_since") or 0),
+            project_name(str(row.get("cwd") or "")).lower(),
+            str(row.get("session_key") or ""),
+        ),
+    )
+
+
+def exited_summary_row(snapshot: DashboardSnapshot) -> dict[str, Any] | None:
+    """Build the selectable main-screen entry for retained exited sessions."""
+    rows = exited_sessions(snapshot)
+    if not rows:
+        return None
+    latest = max(float(row.get("state_since") or 0) for row in rows)
+    return {
+        "_kind": "exited_summary",
+        "session_key": EXITED_SUMMARY_KEY,
+        "state": "exited",
+        "name": "Exited sessions",
+        "exit_count": len(rows),
+        "state_since": latest,
+    }
+
+
+def is_exited_summary(row: Mapping[str, Any] | None) -> bool:
+    return bool(row and row.get("_kind") == "exited_summary")
 
 
 def state_counts(rows: Sequence[Mapping[str, Any]]) -> dict[str, int]:
@@ -744,13 +811,12 @@ def successful_channels(delivered: Mapping[str, Any]) -> list[str]:
 
 
 class DashboardView:
-    def __init__(
-        self, snapshot: DashboardSnapshot, conversation_preview: bool = True
-    ):
+    def __init__(self, snapshot: DashboardSnapshot, conversation_preview: bool = True):
         self.snapshot = snapshot
         self.selected_key = ""
         self.selected_index = 0
         self.filter_mode = "all"
+        self.history_mode = False
         self.query = ""
         self.searching = False
         self.show_help = False
@@ -764,7 +830,14 @@ class DashboardView:
 
     @property
     def rows(self) -> list[dict[str, Any]]:
-        return visible_sessions(self.snapshot, self.filter_mode, self.query)
+        if self.history_mode:
+            return exited_sessions(self.snapshot, self.query)
+        rows = visible_sessions(self.snapshot, self.filter_mode, self.query)
+        if not self.query:
+            summary = exited_summary_row(self.snapshot)
+            if summary is not None:
+                rows.append(summary)
+        return rows
 
     @property
     def selected(self) -> dict[str, Any] | None:
@@ -813,19 +886,37 @@ class DashboardView:
         self.selected_key = str(rows[self.selected_index].get("session_key", ""))
 
     def cycle_filter(self) -> None:
+        if self.history_mode:
+            return
         index = FILTERS.index(self.filter_mode)
         self.filter_mode = FILTERS[(index + 1) % len(FILTERS)]
         self.selected_index = 0
         self.selected_key = ""
         self._ensure_selection()
 
+    def open_exited_sessions(self) -> None:
+        self.history_mode = True
+        self.query = ""
+        self.searching = False
+        self.selected_index = 0
+        self.selected_key = ""
+        self.set_context("", {})
+        self._ensure_selection()
+
+    def close_exited_sessions(self) -> None:
+        self.history_mode = False
+        self.query = ""
+        self.searching = False
+        self.selected_index = 0
+        self.selected_key = EXITED_SUMMARY_KEY
+        self.set_context("", {})
+        self._ensure_selection()
+
     def set_flash(self, message: str, seconds: float = 3.0) -> None:
         self.flash = sanitize(message, 300)
         self.flash_until = time.time() + seconds
 
-    def set_context(
-        self, session_key: str, preview: dict[str, dict[str, Any]]
-    ) -> bool:
+    def set_context(self, session_key: str, preview: dict[str, dict[str, Any]]) -> bool:
         changed = (
             session_key != self.context_session_key or preview != self.context_preview
         )
@@ -871,7 +962,14 @@ def render_header(view: DashboardView, width: int) -> RenderableType:
     top.add_row(brand, health)
 
     summary = Text(no_wrap=True, overflow="ellipsis")
-    if width < 110:
+    if view.history_mode:
+        exited_count = counts.get("exited", 0)
+        summary.append("○ ", style=f"bold {MUTED}")
+        summary.append(str(exited_count), style=f"bold {TEXT}")
+        summary.append(" exited sessions", style=MUTED)
+        if width >= 70:
+            summary.append("  ·  Enter resumes in a new tmux session", style=FAINT)
+    elif width < 110:
         chips = [
             ("needs_input", counts.get("needs_input", 0), "input"),
             ("ready", counts.get("ready", 0), "ready"),
@@ -879,25 +977,23 @@ def render_header(view: DashboardView, width: int) -> RenderableType:
         ]
         if counts.get("error", 0):
             chips.insert(1, ("error", counts.get("error", 0), "errors"))
-        if width >= 60 and counts.get("exited", 0):
-            chips.insert(-1, ("exited", counts.get("exited", 0), "exited"))
     else:
         chips = [
             ("needs_input", counts.get("needs_input", 0), "needs input"),
             ("error", counts.get("error", 0), "errors"),
             ("ready", counts.get("ready", 0), "ready"),
-            ("exited", counts.get("exited", 0), "exited"),
             ("running", counts.get("running", 0), "running"),
             ("auto_wait", counts.get("auto_wait", 0), "auto-wait"),
         ]
-    for index, (state, count, label) in enumerate(chips):
-        symbol, _full_label, color = state_visual(state, view.spinner_index)
-        if index:
-            summary.append("    ")
-        summary.append(f"{symbol} ", style=f"bold {color}")
-        summary.append(str(count), style=f"bold {TEXT}")
-        summary.append(f" {label}", style=MUTED)
-    if stalled_count:
+    if not view.history_mode:
+        for index, (state, count, label) in enumerate(chips):
+            symbol, _full_label, color = state_visual(state, view.spinner_index)
+            if index:
+                summary.append("    ")
+            summary.append(f"{symbol} ", style=f"bold {color}")
+            summary.append(str(count), style=f"bold {TEXT}")
+            summary.append(f" {label}", style=MUTED)
+    if stalled_count and not view.history_mode:
         summary.append("    ")
         summary.append("⚠ ", style=f"bold {YELLOW}")
         summary.append(str(stalled_count), style=f"bold {TEXT}")
@@ -951,6 +1047,41 @@ def render_sessions(view: DashboardView, width: int, height: int) -> RenderableT
     for offset, row in enumerate(shown):
         index = start + offset
         selected = index == view.selected_index
+        if is_exited_summary(row):
+            if last_group != "history-summary":
+                if content:
+                    content.append(Text(""))
+                heading = Text()
+                heading.append("History", style=f"bold {TEXT}")
+                content.append(Padding(heading, (0, 2)))
+                last_group = "history-summary"
+
+            count = int(row.get("exit_count") or 0)
+            elapsed = human_duration(now - float(row.get("state_since") or now))
+            left = Text()
+            left.append(
+                "❯ " if selected else "  ",
+                style=f"bold {ORANGE}" if selected else FAINT,
+            )
+            left.append("○  ", style=f"bold {MUTED}")
+            left.append("Exited sessions", style=f"bold {TEXT}" if selected else TEXT)
+            if selected:
+                left.stylize(f"on {SELECT_BG}")
+            line = Table.grid(expand=True, padding=0)
+            line.add_column(ratio=1, no_wrap=True, overflow="ellipsis")
+            line.add_column(width=28, justify="left", no_wrap=True, overflow="ellipsis")
+            line.add_row(
+                left, Text(f"{count} retained  ·  latest {elapsed} ago", style=MUTED)
+            )
+            content.append(Padding(line, (0, 1)))
+
+            meta = Text()
+            meta.append("   ⎿  ", style=MUTED)
+            meta.append("Enter", style=f"bold {ORANGE}")
+            meta.append(" to browse and resume in a new tmux session", style=MUTED)
+            content.append(Padding(meta, (0, 1)))
+            continue
+
         state = str(row.get("state") or "unknown")
         symbol, label, color = state_visual(state, view.spinner_index)
         stalled = is_stalled(row, view.snapshot.activity_stale_seconds, now)
@@ -958,43 +1089,59 @@ def render_sessions(view: DashboardView, width: int, height: int) -> RenderableT
             symbol, label, color = "⚠", "Possibly stalled", YELLOW
         provider, provider_color = provider_label(str(row.get("provider") or ""))
         group = (
-            "attention"
-            if state in {"needs_input", "error", "ready", "exited"} or stalled
-            else "active"
+            "history"
+            if view.history_mode
+            else (
+                "attention"
+                if state in {"needs_input", "error", "ready"} or stalled
+                else "active"
+            )
         )
         if group != last_group:
             if content:
                 content.append(Text(""))
-            group_count = sum(
-                1
-                for item in rows
-                if (
-                    item.get("state") in {"needs_input", "error", "ready", "exited"}
-                    or is_stalled(item, view.snapshot.activity_stale_seconds, now)
+            if group == "history":
+                group_count = len(rows)
+                group_label = "Exited sessions"
+            else:
+                group_count = sum(
+                    1
+                    for item in rows
+                    if not is_exited_summary(item)
+                    and (
+                        item.get("state") in {"needs_input", "error", "ready"}
+                        or is_stalled(item, view.snapshot.activity_stale_seconds, now)
+                    )
+                    == (group == "attention")
                 )
-                == (group == "attention")
-            )
+                group_label = "Needs attention" if group == "attention" else "Active"
             heading = Text()
-            heading.append(
-                "Needs attention" if group == "attention" else "Active",
-                style=f"bold {TEXT}",
-            )
+            heading.append(group_label, style=f"bold {TEXT}")
             heading.append(f"  {group_count}", style=MUTED)
+            if group == "history":
+                heading.append("  ·  newest first", style=FAINT)
             content.append(Padding(heading, (0, 2)))
             last_group = group
 
         left = Text()
-        left.append("❯ " if selected else "  ", style=f"bold {ORANGE}" if selected else FAINT)
+        left.append(
+            "❯ " if selected else "  ", style=f"bold {ORANGE}" if selected else FAINT
+        )
         left.append(f"{symbol}  ", style=f"bold {color}")
         if not compact:
             left.append(f"{provider:<7}", style=provider_color)
-        left.append(project_name(str(row.get("cwd") or "")), style=f"bold {TEXT}" if selected else TEXT)
+        left.append(
+            project_name(str(row.get("cwd") or "")),
+            style=f"bold {TEXT}" if selected else TEXT,
+        )
         if selected:
             left.stylize(f"on {SELECT_BG}")
-        target = tmux_location_label(row, 28)
+        target = "" if view.history_mode else tmux_location_label(row, 28)
         elapsed = human_duration(now - float(row.get("state_since") or now))
         activity_age = last_activity_age(row, now)
-        if state == "running":
+        if view.history_mode:
+            timing = f"exited {elapsed} ago"
+        elif state == "running":
             if activity_age is None:
                 timing = "Establishing baseline"
             elif stalled:
@@ -1029,9 +1176,16 @@ def render_sessions(view: DashboardView, width: int, height: int) -> RenderableT
                 no_wrap=True,
                 overflow="ellipsis",
             )
-            location = Text(f"tmux {target}" if target else "", style=BLUE)
+            if view.history_mode:
+                available, _reason = resume_availability(row)
+                location = Text(
+                    "Resume ↵" if available else "Unavailable",
+                    style=GREEN if available else MUTED,
+                )
+            else:
+                location = Text(f"tmux {target}" if target else "", style=BLUE)
             timing_cell = Text(
-                f"{'·' if target else ' '}  {timing}",
+                f"{'·' if (target or view.history_mode) else ' '}  {timing}",
                 style=YELLOW if stalled else MUTED,
             )
             line.add_row(left, Text(""), location, Text(""), timing_cell)
@@ -1044,9 +1198,19 @@ def render_sessions(view: DashboardView, width: int, height: int) -> RenderableT
         branch = Text("   ⎿", style=MUTED)
         state_cell = Text(label, style=color)
         context = Text()
-        if target and compact:
+        if view.history_mode:
+            available, reason = resume_availability(row)
+            context.append(
+                (
+                    "·  Enter to resume in a new tmux session"
+                    if available
+                    else f"·  {reason}"
+                ),
+                style=GREEN if available else MUTED,
+            )
+        elif target and compact:
             context.append(f"·  tmux {target}", style=BLUE)
-        if not compact:
+        if not compact and not view.history_mode:
             context.append(
                 f"·  {source_label(str(row.get('source') or ''))}", style=MUTED
             )
@@ -1054,14 +1218,17 @@ def render_sessions(view: DashboardView, width: int, height: int) -> RenderableT
         content.append(Padding(meta, (0, 1)))
 
     if not rows:
-        empty = "No matching sessions"
+        empty = "No exited sessions" if view.history_mode else "No matching sessions"
         if view.query:
             empty += f": {view.query}"
+        elif view.history_mode:
+            empty += ". Resumed sessions return to Current."
         content.append(Padding(Text(f"·  {empty}", style=MUTED), (2, 2)))
 
     if len(rows) > len(shown):
         info = Text(
-            f"{start + 1}–{start + len(shown)} / {len(rows)}  ·  {FILTER_LABELS[view.filter_mode]}",
+            f"{start + 1}–{start + len(shown)} / {len(rows)}  ·  "
+            f"{'Exited sessions' if view.history_mode else FILTER_LABELS[view.filter_mode]}",
             style=FAINT,
             justify="right",
         )
@@ -1164,11 +1331,39 @@ def render_detail(view: DashboardView, width: int, height: int) -> RenderableTyp
     row = view.selected
     if row is None:
         return Panel(
-            Align.center(Text("Select a session to view details", style=MUTED), vertical="middle"),
+            Align.center(
+                Text("Select a session to view details", style=MUTED), vertical="middle"
+            ),
             title="Details",
             title_align="left",
             box=box.MINIMAL,
             border_style=FAINT,
+        )
+    if is_exited_summary(row):
+        count = int(row.get("exit_count") or 0)
+        latest = human_duration(
+            time.time() - float(row.get("state_since") or time.time())
+        )
+        heading = Text()
+        heading.append("○ ", style=f"bold {MUTED}")
+        heading.append("Exited sessions", style=f"bold {TEXT}")
+        body = Text()
+        body.append(
+            f"{count} retained session{'s' if count != 1 else ''}\n", style=TEXT
+        )
+        body.append(f"Latest exit was {latest} ago.\n\n", style=MUTED)
+        body.append("Press ", style=MUTED)
+        body.append("Enter", style=f"bold {ORANGE}")
+        body.append(
+            " to browse recent exits and resume one in a new tmux session.", style=MUTED
+        )
+        return Panel(
+            Group(heading, Text("─" * max(8, min(width - 8, 44)), style=FAINT), body),
+            title="History",
+            title_align="left",
+            box=box.MINIMAL,
+            border_style=FAINT,
+            padding=(0, 1),
         )
     state = str(row.get("state") or "unknown")
     symbol, label, color = state_visual(state, view.spinner_index)
@@ -1194,7 +1389,9 @@ def render_detail(view: DashboardView, width: int, height: int) -> RenderableTyp
         if activity_age is None:
             activity_text = "Establishing activity baseline"
         elif stalled:
-            activity_text = f"⚠ no update for {human_duration(activity_age)}; possibly stalled"
+            activity_text = (
+                f"⚠ no update for {human_duration(activity_age)}; possibly stalled"
+            )
         else:
             activity_text = f"updated {human_duration(activity_age)} ago"
         activity_text += f"  ·  running for {duration}"
@@ -1202,11 +1399,23 @@ def render_detail(view: DashboardView, width: int, height: int) -> RenderableTyp
             detail_line("Activity", activity_text, YELLOW if stalled else GREEN)
         )
     else:
-        lines.append(detail_line("Duration", duration))
-    lines.append(detail_line("tmux", tmux_location_label(row, 100) or "—", BLUE))
+        lines.append(
+            detail_line("Exited" if state == "exited" else "Duration", duration)
+        )
+    lines.append(
+        detail_line(
+            "Last tmux" if state == "exited" else "tmux",
+            tmux_location_label(row, 100) or "—",
+            BLUE,
+        )
+    )
     socket_path = sanitize(row.get("tmux_socket") or "", 300)
     if socket_path and pathlib.Path(socket_path).name != "default" and height >= 24:
-        lines.append(detail_line("Server", shorten_middle(socket_path, max(16, width - 12)), BLUE))
+        lines.append(
+            detail_line(
+                "Server", shorten_middle(socket_path, max(16, width - 12)), BLUE
+            )
+        )
     if height >= 20:
         process_text = f"PID {row.get('pid') or '—'}  ·  {source_label(str(row.get('source') or ''))}"
         lines.append(
@@ -1249,7 +1458,9 @@ def render_detail(view: DashboardView, width: int, height: int) -> RenderableTyp
     if assistant_entry:
         assistant_at = float(assistant_entry.get("at") or 0)
         user_at = float(user_entry.get("at") or 0) if user_entry else 0
-        assistant_label = "Latest progress" if assistant_at >= user_at else "Previous reply"
+        assistant_label = (
+            "Latest progress" if assistant_at >= user_at else "Previous reply"
+        )
         lines.append(
             preview_block(
                 assistant_label,
@@ -1299,7 +1510,22 @@ def render_detail(view: DashboardView, width: int, height: int) -> RenderableTyp
         lines.append(privacy)
     elif not any((user_entry, assistant_entry, tool_entry)):
         lines.append(Text("·  No conversation preview available", style=MUTED))
-    if row.get("tmux_target") and state != "exited":
+    if state == "exited" and view.history_mode:
+        if height >= 20:
+            lines.append(Text(""))
+        available, reason = resume_availability(row)
+        action = Text()
+        if available:
+            action.append("Enter", style=f"bold {ORANGE}")
+            action.append(" to resume in a new tmux session", style=MUTED)
+            action.append("  ·  ", style=FAINT)
+            action.append("Esc", style=f"bold {ORANGE}")
+            action.append(" to return", style=MUTED)
+        else:
+            action.append("Resume unavailable\n", style=f"bold {MUTED}")
+            action.append(reason, style=MUTED)
+        lines.append(action)
+    elif row.get("tmux_target"):
         if height >= 20:
             lines.append(Text(""))
         action = Text()
@@ -1312,7 +1538,7 @@ def render_detail(view: DashboardView, width: int, height: int) -> RenderableTyp
 
     return Panel(
         Group(*lines),
-        title="Session preview",
+        title="Exited session" if view.history_mode else "Session preview",
         title_align="left",
         box=box.MINIMAL,
         border_style=color if state in {"needs_input", "error"} else FAINT,
@@ -1327,10 +1553,11 @@ def render_help(width: int) -> RenderableType:
     for key, action in (
         ("↑ / k", "Previous session"),
         ("↓ / j", "Next session"),
-        ("Enter", "Open selected tmux session"),
+        ("Enter", "Open, browse, or resume the selected item"),
+        ("Esc", "Return from exited sessions"),
         ("tmux prefix + L", "Return to Agent Watch after opening a session"),
         ("/", "Search projects, paths, or sessions"),
-        ("f", "Cycle All / Attention / Running"),
+        ("f", "Cycle Current / Attention / Running"),
         ("p", "Show / hide local session preview"),
         ("r", "Refresh now"),
         ("g / G", "Jump to first / last"),
@@ -1350,7 +1577,9 @@ def render_help(width: int) -> RenderableType:
     return Align.center(panel, vertical="middle")
 
 
-def render_footer(view: DashboardView, width: int, minimal: bool = False) -> RenderableType:
+def render_footer(
+    view: DashboardView, width: int, minimal: bool = False
+) -> RenderableType:
     action = Text()
     action_right = Text()
     if view.searching:
@@ -1365,18 +1594,29 @@ def render_footer(view: DashboardView, width: int, minimal: bool = False) -> Ren
     else:
         row = view.selected
         action.append("❯ ", style=f"bold {ORANGE}")
-        if row:
+        if is_exited_summary(row):
+            count = int(row.get("exit_count") or 0)
+            action.append("Exited sessions", style=f"bold {TEXT}")
+            action.append(f"  ·  {count} retained", style=MUTED)
+            action_right.append("Enter to browse", style=ORANGE)
+        elif row:
             provider, provider_color = provider_label(str(row.get("provider") or ""))
-            _symbol, label, color = state_visual(str(row.get("state") or "unknown"), view.spinner_index)
+            _symbol, label, color = state_visual(
+                str(row.get("state") or "unknown"), view.spinner_index
+            )
             action.append(provider, style=provider_color)
             action.append("  ·  ", style=FAINT)
             action.append(project_name(str(row.get("cwd") or "")), style=TEXT)
             action.append("  ·  ", style=FAINT)
             action.append(label, style=color)
-            if row.get("tmux_target") and width >= 70:
+            if view.history_mode:
+                available, reason = resume_availability(row)
                 action_right.append(
-                    f"tmux {tmux_location_label(row, 100)}", style=BLUE
+                    "Enter to resume" if available else reason,
+                    style=ORANGE if available else MUTED,
                 )
+            elif row.get("tmux_target") and width >= 70:
+                action_right.append(f"tmux {tmux_location_label(row, 100)}", style=BLUE)
             activity_age = last_activity_age(row)
             if (
                 str(row.get("state") or "") == "running"
@@ -1396,10 +1636,17 @@ def render_footer(view: DashboardView, width: int, minimal: bool = False) -> Ren
             action.append("Select a session", style=MUTED)
 
     shortcuts = Text(no_wrap=True, overflow="ellipsis")
+    enter_label = "resume" if view.history_mode else "open"
+    if is_exited_summary(view.selected):
+        enter_label = "browse"
     if width < 48:
-        items = [("↵", "open"), ("↑↓", "select"), ("f", "filter"), ("q", "quit")]
+        items = [("↵", enter_label), ("↑↓", "select"), ("f", "filter"), ("q", "quit")]
     else:
-        items = [("↑↓", "select"), ("enter", "open"), ("/", "search"), ("f", "filter")]
+        items = [("↑↓", "select"), ("enter", enter_label), ("/", "search")]
+        if view.history_mode:
+            items.append(("esc", "back"))
+        else:
+            items.append(("f", "filter"))
     if width >= 120:
         items.extend(
             [("prefix+L", "back"), ("p", "preview"), ("r", "refresh"), ("?", "help")]
@@ -1413,9 +1660,15 @@ def render_footer(view: DashboardView, width: int, minimal: bool = False) -> Ren
         shortcuts.append(f" {label}", style=MUTED)
     right = Text(style=FAINT, justify="right")
     if width >= 105:
-        right.append(
-            f"{len(view.snapshot.sessions)} sessions  ·  {FILTER_LABELS[view.filter_mode]}"
-        )
+        if view.history_mode:
+            right.append(f"{len(exited_sessions(view.snapshot))} exited sessions")
+        else:
+            current_count = sum(
+                row.get("state") != "exited" for row in view.snapshot.sessions
+            )
+            right.append(
+                f"{current_count} sessions  ·  {FILTER_LABELS[view.filter_mode]}"
+            )
     footer_line = Table.grid(expand=True, padding=(0, 1))
     footer_line.add_column(ratio=1)
     footer_line.add_column(justify="right", no_wrap=True)
@@ -1430,7 +1683,12 @@ def render_footer(view: DashboardView, width: int, minimal: bool = False) -> Ren
             Padding(action_line, (0, 1)),
             Padding(footer_line, (0, 1)),
         )
-    return Group(Rule(style=FAINT), Padding(action_line, (0, 1)), Rule(style=FAINT), Padding(footer_line, (0, 2)))
+    return Group(
+        Rule(style=FAINT),
+        Padding(action_line, (0, 1)),
+        Rule(style=FAINT),
+        Padding(footer_line, (0, 2)),
+    )
 
 
 def render_dashboard(view: DashboardView, width: int, height: int) -> RenderableType:
@@ -1479,6 +1737,21 @@ def render_static(snapshot: DashboardSnapshot, width: int = 120) -> RenderableTy
     table.add_column("Source", ratio=2, no_wrap=True, overflow="ellipsis")
     now = time.time()
     for row in rows:
+        if is_exited_summary(row):
+            count = int(row.get("exit_count") or 0)
+            table.add_row(
+                Text("○ History", style=MUTED),
+                "",
+                Text(f"{count} exited session{'s' if count != 1 else ''}"),
+                "—",
+                Text(
+                    human_duration(now - float(row.get("state_since") or now)),
+                    style=MUTED,
+                ),
+                "—",
+                Text("Open agent-watch ui to browse", style=MUTED),
+            )
+            continue
         symbol, label, color = state_visual(str(row.get("state") or "unknown"))
         stalled = is_stalled(row, snapshot.activity_stale_seconds, now)
         if stalled:
@@ -1488,7 +1761,9 @@ def render_static(snapshot: DashboardSnapshot, width: int = 120) -> RenderableTy
         activity = "—"
         activity_color = MUTED
         if str(row.get("state") or "") == "running":
-            activity = "Establishing baseline" if age is None else f"{human_duration(age)} ago"
+            activity = (
+                "Establishing baseline" if age is None else f"{human_duration(age)} ago"
+            )
             activity_color = YELLOW if stalled else GREEN
         table.add_row(
             Text(f"{symbol} {label}", style=color),
@@ -1590,7 +1865,10 @@ def _current_tmux_socket() -> str:
 
 def switch_to_session(row: Mapping[str, Any]) -> tuple[bool, str]:
     if str(row.get("state") or "") == "exited":
-        return False, "This process has exited; the tmux field shows only its last location"
+        return (
+            False,
+            "This process has exited; the tmux field shows only its last location",
+        )
     target = _command_value(row.get("tmux_target") or "", 200)
     pane_id = _command_value(row.get("pane_id") or "", 80)
     target_socket = _command_value(row.get("tmux_socket") or "", 1000)
@@ -1619,7 +1897,10 @@ def switch_to_session(row: Mapping[str, Any]) -> tuple[bool, str]:
                 check=False,
             )
             if check.returncode != 0 or sanitize(check.stdout, 200) != target:
-                return False, "The tmux location is stale; wait for a monitor refresh and try again"
+                return (
+                    False,
+                    "The tmux location is stale; wait for a monitor refresh and try again",
+                )
         if os.environ.get("TMUX"):
             if target_socket and os.path.realpath(target_socket) != os.path.realpath(
                 source_socket
@@ -1627,12 +1908,14 @@ def switch_to_session(row: Mapping[str, Any]) -> tuple[bool, str]:
                 command = shlex.join(
                     ["tmux", "-S", target_socket, "attach", "-t", locator]
                 )
-                return False, f"Target is on another tmux server; run this in a terminal: {command}"
+                return (
+                    False,
+                    f"Target is on another tmux server; run this in a terminal: {command}",
+                )
             source_base = _tmux_base(source_socket)
             source_pane = _command_value(os.environ.get("TMUX_PANE", ""), 80)
             clients = subprocess.run(
-                source_base
-                + ["list-clients", "-F", "#{client_tty}|#{pane_id}"],
+                source_base + ["list-clients", "-F", "#{client_tty}|#{pane_id}"],
                 capture_output=True,
                 text=True,
                 timeout=2,
@@ -1642,15 +1925,19 @@ def switch_to_session(row: Mapping[str, Any]) -> tuple[bool, str]:
             if clients.returncode == 0 and source_pane:
                 for line in clients.stdout.splitlines():
                     tty_name, separator, active_pane = line.partition("|")
-                    if separator and active_pane == source_pane and _command_value(
-                        tty_name, 300
+                    if (
+                        separator
+                        and active_pane == source_pane
+                        and _command_value(tty_name, 300)
                     ):
                         candidates.append(tty_name)
             if len(candidates) != 1:
-                return False, "Multiple clients are viewing this dashboard; cannot choose which one to switch"
+                return (
+                    False,
+                    "Multiple clients are viewing this dashboard; cannot choose which one to switch",
+                )
             run = subprocess.run(
-                source_base
-                + ["switch-client", "-c", candidates[0], "-t", locator],
+                source_base + ["switch-client", "-c", candidates[0], "-t", locator],
                 capture_output=True,
                 text=True,
                 timeout=3,
@@ -1677,7 +1964,9 @@ def switch_to_session(row: Mapping[str, Any]) -> tuple[bool, str]:
             run = subprocess.run(base + ["attach-session", "-t", locator], check=False)
         if run.returncode == 0:
             return True, ""
-        return False, sanitize(getattr(run, "stderr", "") or "Unable to open tmux session", 200)
+        return False, sanitize(
+            getattr(run, "stderr", "") or "Unable to open tmux session", 200
+        )
     except (OSError, subprocess.SubprocessError) as exc:
         return False, sanitize(exc, 200)
 
@@ -1732,6 +2021,13 @@ def handle_key(view: DashboardView, key: str, text: str, page_size: int) -> str:
             view.show_help = False
         return ""
 
+    if view.history_mode and key in {"escape", "backspace"}:
+        if view.query:
+            view.query = ""
+            view._ensure_selection()
+        else:
+            view.close_exited_sessions()
+        return ""
     if key == "quit" or (key == "text" and text == "q"):
         return "quit"
     if key == "up" or (key == "text" and text == "k"):
@@ -1747,7 +2043,12 @@ def handle_key(view: DashboardView, key: str, text: str, page_size: int) -> str:
     elif key == "end" or (key == "text" and text == "G"):
         view.jump(max(0, len(view.rows) - 1))
     elif key == "enter":
-        return "attach"
+        if is_exited_summary(view.selected):
+            view.open_exited_sessions()
+        elif view.history_mode:
+            return "resume"
+        else:
+            return "attach"
     elif key == "text" and text == "/":
         view.searching = True
     elif key == "text" and text == "f":
@@ -1805,15 +2106,14 @@ def run_dashboard(
         handled_signals.append(signal.SIGHUP)
     if hasattr(signal, "SIGTSTP"):
         handled_signals.append(signal.SIGTSTP)
-    previous_handlers = {
-        signum: signal.getsignal(signum) for signum in handled_signals
-    }
+    previous_handlers = {signum: signal.getsignal(signum) for signum in handled_signals}
     for signum in handled_signals:
         signal.signal(signum, handle_signal)
 
     try:
         while not quit_requested and not signal_state["terminate"]:
             attach_row: dict[str, Any] | None = None
+            resume_row: dict[str, Any] | None = None
             force_refresh = False
             last_load = 0.0
             last_render = 0.0
@@ -1866,9 +2166,8 @@ def run_dashboard(
                             ):
                                 data_changed = True
                         elif (
-                            (console.width < 100 or not view.conversation_preview)
-                            and view.context_session_key
-                        ):
+                            console.width < 100 or not view.conversation_preview
+                        ) and view.context_session_key:
                             if view.set_context("", {}):
                                 data_changed = True
                         frame_rate = 1
@@ -1910,6 +2209,12 @@ def run_dashboard(
                                 view.set_flash("No session selected")
                             else:
                                 break
+                        if action == "resume":
+                            resume_row = view.selected
+                            if resume_row is None:
+                                view.set_flash("No exited session selected")
+                            else:
+                                break
                         if action == "refresh":
                             force_refresh = True
             if signal_state["terminate"]:
@@ -1927,6 +2232,10 @@ def run_dashboard(
                 ok, message = switch_to_session(attach_row)
                 if not ok:
                     view.set_flash(message or "Unable to open tmux session")
+            if resume_row is not None:
+                ok, message = resume_in_new_tmux(resume_row, state_dir=state_dir)
+                if not ok:
+                    view.set_flash(message or "Unable to resume this session")
         signum = int(signal_state["terminate"] or 0)
         return 128 + signum if signum else 0
     finally:

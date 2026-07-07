@@ -26,9 +26,12 @@ prompts, paths, tmux locations, or other user data.
 
 - Combines native hooks, Codex rollout events, Claude session state, process
   metadata, and a conservative tmux screen fallback.
-- Provides a Claude Code-inspired, read-only terminal dashboard showing project,
-  state, last activity, and `tmux session:window.pane`; press Enter to enter the
-  exact target pane.
+- Provides a Claude Code-inspired terminal dashboard showing project,
+  state, last activity, and `tmux session:window.pane`; press Enter on a current
+  session to enter the exact target pane.
+- Keeps exited sessions out of the main list and groups them under an
+  `Exited sessions` entry at the bottom. From its history page, an available
+  session can be resumed in a new, independent tmux session.
 - Shows the latest request, recent progress, and tool type in the wide-screen
   preview panel. Conversation preview is hidden by default and can be toggled
   temporarily with `p`.
@@ -202,20 +205,29 @@ agent-watch clear-history --yes       # stop the daemon first
 Dashboard keys:
 
 ```text
-Up/Down or j/k   select a session      Enter             enter selected tmux pane
-tmux prefix + L  return to Agent Watch /                 search
-f                cycle filters         g/G               first/last session
-p                show/hide preview     r                 refresh
-?                help                  q                 close only the UI
+Up/Down or j/k   select an item        Enter             open selected item
+Esc              return from history  /                 search
+tmux prefix + L  return to Agent Watch
+f                cycle filters        g/G               first/last item
+p                show/hide preview    r                 refresh
+?                help                 q                 close only the UI
 ```
 
-Sessions needing input, failed sessions, completed turns, exited processes,
-running sessions, and automatic waits are kept distinct. Running sessions show
+Sessions needing input, failed sessions, completed turns, running sessions, and
+automatic waits are kept distinct in the main list. Exited sessions are not
+shown there individually; an `Exited sessions` entry at the bottom opens their
+history page with Enter, and Esc returns to the main list. Running sessions show
 the time since their last real terminal, rollout, or transcript activity. The
 default "possibly stalled" threshold is ten minutes and can be changed with
 `monitor.activity_stale_seconds`.
 
-When a tmux location is available, the list and details show
+On the exited-session history page, Enter resumes the selected available record
+with its original working directory and provider session ID. Resume always
+creates a new, independent tmux session; it does not reuse the exited pane.
+Records that cannot be resumed remain visible with the reason. The configured
+history retention period still applies to these records.
+
+When a current session's tmux location is available, the list and details show
 `session:window.pane`, including a custom tmux server name where relevant. The
 Enter action targets the exact pane. It fails closed when multiple tmux clients
 make the initiating client ambiguous, and it prints a manual attach command for

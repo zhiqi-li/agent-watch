@@ -7,7 +7,18 @@ experimental.
 
 ## [Unreleased]
 
-No changes yet.
+### Added
+
+- An exited-session history page, opened from a single `Exited sessions` entry
+  at the bottom of the dashboard. Enter resumes an available record with its
+  original working directory and provider session ID in a new, independent tmux
+  session; unavailable records explain why they cannot be resumed, and Esc
+  returns to the main list.
+
+### Changed
+
+- Exited sessions are no longer shown individually in the main session list;
+  their existing configured history retention period still applies.
 
 ## [0.2.1] - 2026-07-07
 

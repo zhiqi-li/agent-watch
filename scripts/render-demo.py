@@ -122,6 +122,17 @@ def build_demo() -> DashboardView:
             "codex-rollout",
             4105,
         ),
+        demo_row(
+            "claude:catalog-import",
+            "claude",
+            "catalog-import",
+            "exited",
+            "dev:4.0",
+            3_600,
+            3_600,
+            "claude-hook",
+            4106,
+        ),
     ]
     snapshot = DashboardSnapshot(
         sessions=rows,
