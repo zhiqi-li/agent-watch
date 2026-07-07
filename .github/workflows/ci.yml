@@ -37,7 +37,7 @@ jobs:
 
       - name: Smoke-test installed command
         run: |
-          test "$(agent-watch --version)" = "agent-watch 0.2.0"
+          test "$(agent-watch --version)" = "agent-watch 0.2.1"
           cd /tmp
           python -I -m agent_watch --version
           agent-watch --state-dir "$RUNNER_TEMP/agent-watch-state" status --json

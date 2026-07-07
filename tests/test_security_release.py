@@ -192,8 +192,11 @@ class StateStorageSecurityTests(unittest.TestCase):
             (spool / "event.json").write_text("{}")
             (state / "hook-errors.log").write_text("private error\n")
             args = type("Args", (), {"yes": True, "state_dir": str(state)})()
-            with contextlib.redirect_stdout(io.StringIO()):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
                 self.assertEqual(aw.clear_history_command(args), 0)
+            self.assertIn("Cleared local history:", output.getvalue())
+            self.assertNotIn("\u5df2\u6e05\u7406", output.getvalue())
             db = aw.StateDB(state)
             self.assertEqual(db.conn.execute("SELECT count(*) FROM sessions").fetchone()[0], 0)
             db.close()

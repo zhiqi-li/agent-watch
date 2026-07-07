@@ -5,6 +5,7 @@ include PRIVACY.md
 include README.md
 include SECURITY.md
 include config.example.toml
-recursive-include scripts agent-watch
+recursive-include docs *.md *.svg
+recursive-include scripts *.py agent-watch
 recursive-include systemd *.service
 recursive-include tests *.py

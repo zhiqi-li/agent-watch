@@ -7,16 +7,19 @@ needs_input_repeat_seconds = 1800
 capture_lines = 80
 tmux_fallback_interval_seconds = 6
 tmux_fallback = true
-# 运行中超过这个时间没有终端输出、rollout 或 transcript 更新时，UI 标记“可能卡住”。
+# Mark a running session as "possibly stalled" in the UI after this many
+# seconds without terminal, rollout, or transcript activity.
 activity_stale_seconds = 600
-# 已投递通知与过期会话的本地历史保留天数；待重试通知不会被清理。
+# Retain delivered notifications and stale session history for this many days.
+# Pending notification retries are never pruned by retention cleanup.
 retention_days = 30
 process_exit_notifications = true
 ignore_tmux_sessions = ["agent-watch"]
 
 [ui]
-# 会话文本可能出现在共享终端、录屏或截图中，因此公开安装默认关闭。
-# UI 内可随时按 p 临时显示或隐藏。
+# Conversation text may appear on shared terminals, recordings, or screenshots,
+# so public installations keep the preview disabled by default. Press p in the
+# UI to show or hide it temporarily.
 conversation_preview = false
 
 [notifications]
@@ -25,24 +28,27 @@ tmux = true
 desktop = false
 timeout_seconds = 6
 include_cwd = false
-# 默认不把提示词、命令或回答正文发到远端。
+# Do not send prompts, commands, or response excerpts remotely by default.
 include_message_preview = false
-# 默认不向 webhook/ntfy/Telegram/Bark 发送 tmux socket 绝对路径或 pane ID。
+# Do not send absolute tmux socket paths or pane IDs to remote providers by
+# default.
 include_tmux_socket = false
-# 只有自建 HTTP 服务确实无法启用 TLS 时才打开；会允许明文发送通知数据。
+# Enable only when a trusted self-hosted endpoint cannot use TLS. This permits
+# notification data to be sent over plaintext HTTP.
 allow_insecure_http = false
 
-# 自定义命令会收到一个 JSON 对象（stdin），不会经 shell 执行。
+# A custom command receives one JSON object on stdin and is never invoked
+# through a shell. Prefer an absolute executable path.
 [notifications.command]
 argv = []
 # argv = ["/usr/local/bin/my-notifier"]
 
-# 通用 JSON POST webhook。
+# Generic JSON POST webhook.
 [notifications.webhook]
 url = ""
 bearer_token = ""
 
-# 推荐的轻量手机推送。url 应包含主题，例如：
+# Lightweight mobile notifications. The URL must include the topic, for example:
 # https://ntfy.sh/a-long-random-private-topic
 [notifications.ntfy]
 url = ""
@@ -53,6 +59,6 @@ priority = "high"
 bot_token = ""
 chat_id = ""
 
-# Bark 可直接填完整推送 URL。
+# Bark accepts a complete push URL.
 [notifications.bark]
 url = ""

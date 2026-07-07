@@ -2,6 +2,7 @@ import importlib.util
 import io
 import json
 import pathlib
+import subprocess
 import sys
 import tempfile
 import time
@@ -41,6 +42,26 @@ def make_row(key, state, project, provider="codex", when=None):
 
 
 class DashboardTests(unittest.TestCase):
+    def test_readme_screenshot_is_reproducible_synthetic_data(self):
+        committed = ROOT / "docs" / "agent-watch-demo.svg"
+        with tempfile.TemporaryDirectory() as tmp:
+            generated = pathlib.Path(tmp) / "demo.svg"
+            run = subprocess.run(
+                [sys.executable, str(ROOT / "scripts" / "render-demo.py"), str(generated)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertEqual(generated.read_bytes(), committed.read_bytes())
+        text = committed.read_text()
+        self.assertIn("checkout-api", text)
+        self.assertNotIn("/root", text)
+        self.assertNotIn("zhiqi-li", text)
+        self.assertNotIn("cdnjs.cloudflare.com", text)
+        self.assertFalse(any("\u4e00" <= char <= "\u9fff" for char in text))
+
     def test_snapshot_distinguishes_live_daemon_from_failed_scan(self):
         with tempfile.TemporaryDirectory() as tmp:
             state = pathlib.Path(tmp)
@@ -201,9 +222,9 @@ class DashboardTests(unittest.TestCase):
         )
         console.print(ui.render_detail(view, 56, 35))
         rendered = output.getvalue()
-        self.assertIn("最近动作", rendered)
-        self.assertNotIn("当前动作", rendered)
-        self.assertIn("Enter 进入该 tmux 会话", rendered)
+        self.assertIn("Last action", rendered)
+        self.assertNotIn("Current action", rendered)
+        self.assertIn("Enter to open this tmux session", rendered)
 
     def test_sanitize_removes_terminal_controls(self):
         value = ui.sanitize("safe\x1b[31m red\x1b[0m\x1b]0;title\x07\u202erev\x7f")
@@ -229,8 +250,8 @@ class DashboardTests(unittest.TestCase):
             file=output, width=140, height=40, force_terminal=False, color_system=None
         )
         console.print(ui.render_dashboard(ui.DashboardView(snapshot), 140, 40))
-        self.assertIn("无更新", output.getvalue())
-        self.assertIn("可能卡住", output.getvalue())
+        self.assertIn("no update", output.getvalue())
+        self.assertIn("possibly stalled", output.getvalue())
 
     def test_switch_targets_unique_tmux_client_and_exact_pane(self):
         row = make_row("agent", "running", "agent")
@@ -275,7 +296,7 @@ class DashboardTests(unittest.TestCase):
         ), mock.patch.object(ui.subprocess, "run", side_effect=results):
             ok, message = ui.switch_to_session(row)
         self.assertFalse(ok)
-        self.assertIn("多个客户端", message)
+        self.assertIn("Multiple clients", message)
 
     def test_switch_rejects_cross_socket_with_quoted_command(self):
         row = make_row("agent", "running", "agent")
@@ -292,7 +313,7 @@ class DashboardTests(unittest.TestCase):
         ) as run:
             ok, message = ui.switch_to_session(row)
         self.assertFalse(ok)
-        self.assertIn("另一个 tmux server", message)
+        self.assertIn("another tmux server", message)
         self.assertIn("'/tmp/custom socket'", message)
         self.assertEqual(run.call_count, 1)
 
@@ -328,7 +349,7 @@ class DashboardTests(unittest.TestCase):
         with mock.patch.object(ui.subprocess, "run") as run:
             ok, message = ui.switch_to_session(row)
         self.assertFalse(ok)
-        self.assertIn("最后所在", message)
+        self.assertIn("last location", message)
         run.assert_not_called()
 
     def test_priority_and_filtering(self):
@@ -361,9 +382,9 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(view.selected["session_key"], "a")
 
     def test_cjk_cell_width_and_crop(self):
-        self.assertEqual(ui.cell_width("ab中"), 4)
-        self.assertEqual(ui.crop_cells("ab中文", 4), "ab中")
-        shortened = ui.shorten_middle("很长的项目名称-with-tail", 12)
+        self.assertEqual(ui.cell_width("ab한"), 4)
+        self.assertEqual(ui.crop_cells("ab한글", 4), "ab한")
+        shortened = ui.shorten_middle("매우긴프로젝트이름-with-tail", 12)
         self.assertLessEqual(ui.cell_width(shortened), 12)
 
     @unittest.skipUnless(ui.RICH_AVAILABLE, "rich unavailable")
@@ -372,7 +393,7 @@ class DashboardTests(unittest.TestCase):
 
         snapshot = ui.DashboardSnapshot(
             sessions=[
-                make_row("input", "needs_input", "需要回复项目", "claude"),
+                make_row("input", "needs_input", "needs-reply-project", "claude"),
                 make_row("run", "running", "running-project"),
             ],
             daemon_alive=True,
@@ -391,7 +412,7 @@ class DashboardTests(unittest.TestCase):
             console.print(ui.render_dashboard(view, width, height))
             rendered = output.getvalue()
             self.assertIn("agent-watch", rendered)
-            self.assertIn("需要回复项目", rendered)
+            self.assertIn("needs-reply-project", rendered)
             self.assertIn("tmux 1:0.0", rendered)
 
     @unittest.skipUnless(ui.RICH_AVAILABLE, "rich unavailable")
@@ -426,12 +447,12 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(len(tmux_lines), 3)
             self.assertEqual(len({line.index("tmux") for line in tmux_lines}), 1)
             activity_lines = [
-                line for line in output.getvalue().splitlines() if "更新" in line
+                line for line in output.getvalue().splitlines() if "updated" in line
             ]
             self.assertEqual(len(activity_lines), 2)
-            self.assertEqual(len({line.index("更新") for line in activity_lines}), 1)
+            self.assertEqual(len({line.index("updated") for line in activity_lines}), 1)
             self.assertTrue(
-                all(line[line.index("更新") - 1].isspace() for line in activity_lines)
+                all(line[line.index("updated") - 1].isspace() for line in activity_lines)
             )
 
     def test_key_handling(self):

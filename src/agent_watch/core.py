@@ -1682,24 +1682,24 @@ def hook_to_observation(source: str, payload: Mapping[str, Any]) -> Observation 
 
 
 STATE_LABELS = {
-    "ready": "本轮已结束，请查看",
-    "needs_input": "需要你的回复或授权",
-    "error": "运行异常，请查看",
-    "exited": "进程已退出（原因未知）",
-    "running": "运行中",
-    "auto_wait": "自动等待中",
-    "resolved": "已处理",
-    "unknown": "状态未知",
+    "ready": "Turn finished; review needed",
+    "needs_input": "Needs your response or approval",
+    "error": "Run failed; review needed",
+    "exited": "Process exited (reason unknown)",
+    "running": "Running",
+    "auto_wait": "Waiting automatically",
+    "resolved": "Resolved",
+    "unknown": "Unknown status",
 }
 SHORT_LABELS = {
-    "ready": "待查看",
-    "needs_input": "需回复",
-    "error": "异常",
-    "exited": "已退出",
-    "running": "运行中",
-    "auto_wait": "自动等待",
-    "resolved": "已处理",
-    "unknown": "未知",
+    "ready": "Review",
+    "needs_input": "Reply",
+    "error": "Error",
+    "exited": "Exited",
+    "running": "Running",
+    "auto_wait": "Auto-wait",
+    "resolved": "Resolved",
+    "unknown": "Unknown",
 }
 
 
@@ -1771,7 +1771,7 @@ def format_notification(
         label = STATE_LABELS.get(row["state"], row["state"])
         project = project_name(row["cwd"])
         title = f"{provider} · {label}"
-        bits = [f"主机: {host}", f"项目: {project}"]
+        bits = [f"Host: {host}", f"Project: {project}"]
         if row["tmux_target"]:
             socket_path = str(mapping_value(row, "tmux_socket", "") or "")
             server = (
@@ -1781,13 +1781,13 @@ def format_notification(
             )
             bits.append(f"tmux: {row['tmux_target']}{server}")
             if include_socket:
-                bits.append(f"查看: {tmux_attach_command(row)}")
+                bits.append(f"Open: {tmux_attach_command(row)}")
         elif row["pid"]:
             bits.append(f"PID: {row['pid']}")
         body = "\n".join(bits)
     else:
-        title = f"Agent Watch · {len(rows)} 个会话需要关注"
-        lines = [f"主机: {host}"]
+        title = f"Agent Watch · {len(rows)} sessions need attention"
+        lines = [f"Host: {host}"]
         for row in rows[:12]:
             provider = "Codex" if row["provider"] == "codex" else "Claude"
             label = SHORT_LABELS.get(row["state"], row["state"])
@@ -1805,7 +1805,7 @@ def format_notification(
             where = f" · tmux {target}" if target else ""
             lines.append(f"[{label}] {provider} · {project_name(row['cwd'])}{where}")
         if len(rows) > 12:
-            lines.append(f"另有 {len(rows) - 12} 个会话")
+            lines.append(f"{len(rows) - 12} more sessions")
         body = "\n".join(lines)
     payload = {
         "app": APP_NAME,
@@ -2594,16 +2594,16 @@ def install_hooks(args: argparse.Namespace) -> int:
         changed.append(str(claude_path))
 
     if changed:
-        print("已安装 hooks:")
+        print("Hooks installed:")
         for item in changed:
             print(f"  {item}")
     else:
-        print("hooks 已存在，无需修改。")
+        print("Hooks are already up to date.")
     if backups:
-        print("备份:")
+        print("Backups:")
         for item in backups:
             print(f"  {item}")
-    print("Codex 新 hook 需要在任一 Codex 会话里运行 /hooks 并信任一次。")
+    print("New Codex hooks must be trusted once; run /hooks in any Codex session.")
     return 0
 
 
@@ -2660,7 +2660,7 @@ def uninstall_hooks(_args: argparse.Namespace) -> int:
             if remove_agent_watch_handlers(settings):
                 backup = backup_file(path)
                 atomic_json_write(path, settings)
-                print(f"已从 {path} 移除 agent-watch hooks；备份: {backup}")
+                print(f"Removed agent-watch hooks from {path}; backup: {backup}")
     return 0
 
 
@@ -2716,21 +2716,21 @@ def status_command(args: argparse.Namespace, config: Mapping[str, Any]) -> int:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         db.close()
         return 0
-    print(f"daemon: {'运行中' if alive else '未运行'}", end="")
+    print(f"daemon: {'running' if alive else 'stopped'}", end="")
     if heartbeat:
-        print(f"（最后心跳 {iso_time(heartbeat[1])}）")
+        print(f" (last heartbeat {iso_time(heartbeat[1])})")
     else:
         print()
     if not rows:
-        print("尚无监控记录。")
+        print("No monitored sessions yet.")
         db.close()
         return 0
-    print(f"{'状态':<8} {'工具':<7} {'PID':<8} {'tmux':<10} {'项目':<28} 来源")
+    print(f"{'State':<10} {'Agent':<7} {'PID':<8} {'tmux':<10} {'Project':<28} Source")
     for row in rows:
         state = SHORT_LABELS.get(row["state"], row["state"])
         provider = "Codex" if row["provider"] == "codex" else "Claude"
         print(
-            f"{state:<8} {provider:<7} {str(row['pid'] or '-'):<8} "
+            f"{state:<10} {provider:<7} {str(row['pid'] or '-'):<8} "
             f"{(row['tmux_target'] or '-'):<10} {project_name(row['cwd'])[:28]:<28} {row['source']}"
         )
     db.close()
@@ -2740,11 +2740,14 @@ def status_command(args: argparse.Namespace, config: Mapping[str, Any]) -> int:
 def clear_history_command(args: argparse.Namespace) -> int:
     if not args.yes:
         if not sys.stdin.isatty():
-            print("拒绝清理：请显式传入 --yes", file=sys.stderr)
+            print(
+                "Refusing to clear history in a non-interactive shell without --yes.",
+                file=sys.stderr,
+            )
             return 2
-        answer = input("删除 Agent Watch 的本地会话与通知历史？[y/N] ")
+        answer = input("Delete Agent Watch local session and notification history? [y/N] ")
         if answer.strip().lower() not in {"y", "yes"}:
-            print("已取消。")
+            print("Cancelled.")
             return 1
     state_dir = pathlib.Path(args.state_dir)
     lock = DaemonLock(state_dir / "daemon.lock")
@@ -2752,7 +2755,10 @@ def clear_history_command(args: argparse.Namespace) -> int:
         lock.acquire()
     except RuntimeError:
         lock.close()
-        print("清理前请先停止 agent-watch daemon，以避免遗漏并发写入。", file=sys.stderr)
+        print(
+            "Stop the agent-watch daemon before clearing history to avoid concurrent writes.",
+            file=sys.stderr,
+        )
         return 1
     try:
         db = StateDB(state_dir)
@@ -2784,10 +2790,10 @@ def clear_history_command(args: argparse.Namespace) -> int:
     finally:
         lock.close()
     print(
-        "已清理本地历史："
-        f"{counts['sessions']} 个会话，{counts['notifications']} 条通知，"
-        f"{counts['outbox']} 条队列记录，{spool_count} 个 hook spool 文件，"
-        f"错误日志{'已删除' if error_log_removed else '不存在'}。"
+        "Cleared local history: "
+        f"{counts['sessions']} sessions, {counts['notifications']} notifications, "
+        f"{counts['outbox']} outbox records, {spool_count} hook spool files; "
+        f"error log {'removed' if error_log_removed else 'not found'}."
     )
     return 0
 
@@ -2833,7 +2839,7 @@ def test_notification(args: argparse.Namespace, config: Mapping[str, Any]) -> in
     db.close()
     required = required_channels(config)
     success = bool(required) and all(channel_succeeded(delivered.get(name)) for name in required)
-    print(f"测试通知{'成功' if success else '失败'}：{delivered}")
+    print(f"Test notification {'succeeded' if success else 'failed'}: {delivered}")
     return 0
 
 
@@ -2896,7 +2902,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         config = load_config(pathlib.Path(args.config))
     except (OSError, ValueError, tomllib.TOMLDecodeError) as exc:
-        print(f"配置错误: {exc}", file=sys.stderr)
+        print(f"Configuration error: {exc}", file=sys.stderr)
         return 2
     if args.command == "daemon":
         return run_daemon(args, config)
@@ -2904,7 +2910,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             from .dashboard import run_dashboard
         except ImportError as exc:
-            print(f"UI 加载失败: {exc}", file=sys.stderr)
+            print(f"Failed to load UI: {exc}", file=sys.stderr)
             return 2
         return run_dashboard(
             pathlib.Path(args.state_dir),

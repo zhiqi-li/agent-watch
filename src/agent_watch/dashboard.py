@@ -63,19 +63,19 @@ SELECT_BG = "color(237)"
 
 SPINNER = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 STATE_META: dict[str, tuple[str, str, str, int]] = {
-    "needs_input": ("?", "需要回复", YELLOW, 0),
-    "error": ("×", "异常", RED, 1),
-    "ready": ("●", "待查看", GREEN, 2),
-    "exited": ("○", "已退出", MUTED, 3),
-    "running": ("✳", "运行中", ORANGE, 4),
-    "auto_wait": ("◷", "自动等待", BLUE, 5),
-    "unknown": ("?", "未知", MUTED, 6),
-    "resolved": ("·", "已处理", FAINT, 7),
-    "superseded": ("·", "已替代", FAINT, 8),
+    "needs_input": ("?", "Needs input", YELLOW, 0),
+    "error": ("×", "Error", RED, 1),
+    "ready": ("●", "Ready", GREEN, 2),
+    "exited": ("○", "Exited", MUTED, 3),
+    "running": ("✳", "Running", ORANGE, 4),
+    "auto_wait": ("◷", "Auto-wait", BLUE, 5),
+    "unknown": ("?", "Unknown", MUTED, 6),
+    "resolved": ("·", "Resolved", FAINT, 7),
+    "superseded": ("·", "Superseded", FAINT, 8),
 }
 
 FILTERS = ("all", "attention", "running")
-FILTER_LABELS = {"all": "全部", "attention": "需关注", "running": "运行中"}
+FILTER_LABELS = {"all": "All", "attention": "Attention", "running": "Running"}
 
 ANSI_RE = re.compile(
     r"(?:\x1B\][^\x07]*(?:\x07|\x1B\\)|\x1B\[[0-?]*[ -/]*[@-~]|\x1B[@-_])"
@@ -122,7 +122,7 @@ def load_snapshot(
     snapshot = DashboardSnapshot(activity_stale_seconds=max(30.0, activity_stale_seconds))
     path = state_dir / "state.sqlite3"
     if not path.exists():
-        snapshot.error = "状态数据库尚未创建；请先启动 agent-watch daemon。"
+        snapshot.error = "State database not found; start agent-watch daemon first."
         return snapshot
     uri = path.resolve().as_uri() + "?mode=ro"
     conn: sqlite3.Connection | None = None
@@ -180,7 +180,7 @@ def load_snapshot(
                 snapshot.last_notification = item
         conn.commit()
     except (OSError, sqlite3.Error) as exc:
-        snapshot.error = f"读取状态失败：{exc}"
+        snapshot.error = f"Failed to read state: {exc}"
         if conn is not None:
             with contextlib.suppress(sqlite3.Error):
                 conn.rollback()
@@ -851,18 +851,18 @@ def render_header(view: DashboardView, width: int) -> RenderableType:
     health = Text(justify="right")
     if snapshot.daemon_alive:
         if snapshot.last_scan_error:
-            health.append("● LIVE" if width >= 48 else "● 运行", style=f"bold {YELLOW}")
+            health.append("● LIVE" if width >= 48 else "● RUN", style=f"bold {YELLOW}")
             if width >= 48:
-                health.append("  ·  最近扫描异常", style=YELLOW)
+                health.append("  ·  Recent scan failed", style=YELLOW)
         else:
-            health.append("● LIVE" if width >= 48 else "● 正常", style=f"bold {GREEN}")
+            health.append("● LIVE" if width >= 48 else "● OK", style=f"bold {GREEN}")
             if width >= 48:
-                health.append("  ·  刚刚更新", style=MUTED)
+                health.append("  ·  Updated just now", style=MUTED)
     else:
-        health.append("× 监控已停止", style=f"bold {RED}")
+        health.append("× MONITOR STOPPED", style=f"bold {RED}")
         if snapshot.heartbeat_at:
             health.append(
-                f"  ·  {human_duration(time.time() - snapshot.heartbeat_at)} 前",
+                f"  ·  {human_duration(time.time() - snapshot.heartbeat_at)} ago",
                 style=MUTED,
             )
     top = Table.grid(expand=True, padding=0)
@@ -873,22 +873,22 @@ def render_header(view: DashboardView, width: int) -> RenderableType:
     summary = Text(no_wrap=True, overflow="ellipsis")
     if width < 110:
         chips = [
-            ("needs_input", counts.get("needs_input", 0), "回复"),
-            ("ready", counts.get("ready", 0), "待看"),
-            ("running", counts.get("running", 0), "运行"),
+            ("needs_input", counts.get("needs_input", 0), "input"),
+            ("ready", counts.get("ready", 0), "ready"),
+            ("running", counts.get("running", 0), "running"),
         ]
         if counts.get("error", 0):
-            chips.insert(1, ("error", counts.get("error", 0), "异常"))
+            chips.insert(1, ("error", counts.get("error", 0), "errors"))
         if width >= 60 and counts.get("exited", 0):
-            chips.insert(-1, ("exited", counts.get("exited", 0), "退出"))
+            chips.insert(-1, ("exited", counts.get("exited", 0), "exited"))
     else:
         chips = [
-            ("needs_input", counts.get("needs_input", 0), "需要回复"),
-            ("error", counts.get("error", 0), "异常"),
-            ("ready", counts.get("ready", 0), "待查看"),
-            ("exited", counts.get("exited", 0), "已退出"),
-            ("running", counts.get("running", 0), "运行中"),
-            ("auto_wait", counts.get("auto_wait", 0), "自动等待"),
+            ("needs_input", counts.get("needs_input", 0), "needs input"),
+            ("error", counts.get("error", 0), "errors"),
+            ("ready", counts.get("ready", 0), "ready"),
+            ("exited", counts.get("exited", 0), "exited"),
+            ("running", counts.get("running", 0), "running"),
+            ("auto_wait", counts.get("auto_wait", 0), "auto-wait"),
         ]
     for index, (state, count, label) in enumerate(chips):
         symbol, _full_label, color = state_visual(state, view.spinner_index)
@@ -901,12 +901,12 @@ def render_header(view: DashboardView, width: int) -> RenderableType:
         summary.append("    ")
         summary.append("⚠ ", style=f"bold {YELLOW}")
         summary.append(str(stalled_count), style=f"bold {TEXT}")
-        summary.append(" 可能卡住" if width >= 70 else " 停滞", style=YELLOW)
+        summary.append(" possibly stalled" if width >= 70 else " stalled", style=YELLOW)
     if snapshot.pending_outbox:
         summary.append("    ")
-        summary.append(f"⇡ {snapshot.pending_outbox} 待投递", style=YELLOW)
+        summary.append(f"⇡ {snapshot.pending_outbox} pending", style=YELLOW)
     if snapshot.retrying_outbox:
-        summary.append(f" / {snapshot.retrying_outbox} 重试", style=RED)
+        summary.append(f" / {snapshot.retrying_outbox} retrying", style=RED)
 
     content: list[RenderableType] = [
         Padding(top, (0, 1)),
@@ -924,7 +924,7 @@ def render_header(view: DashboardView, width: int) -> RenderableType:
         content.append(
             Padding(
                 Text(
-                    f"最近扫描异常：{snapshot.last_scan_error}",
+                    f"Latest scan failed: {snapshot.last_scan_error}",
                     style=YELLOW,
                     overflow="ellipsis",
                 ),
@@ -955,7 +955,7 @@ def render_sessions(view: DashboardView, width: int, height: int) -> RenderableT
         symbol, label, color = state_visual(state, view.spinner_index)
         stalled = is_stalled(row, view.snapshot.activity_stale_seconds, now)
         if stalled:
-            symbol, label, color = "⚠", "可能卡住", YELLOW
+            symbol, label, color = "⚠", "Possibly stalled", YELLOW
         provider, provider_color = provider_label(str(row.get("provider") or ""))
         group = (
             "attention"
@@ -976,7 +976,7 @@ def render_sessions(view: DashboardView, width: int, height: int) -> RenderableT
             )
             heading = Text()
             heading.append(
-                "需要关注" if group == "attention" else "运行中",
+                "Needs attention" if group == "attention" else "Active",
                 style=f"bold {TEXT}",
             )
             heading.append(f"  {group_count}", style=MUTED)
@@ -996,11 +996,11 @@ def render_sessions(view: DashboardView, width: int, height: int) -> RenderableT
         activity_age = last_activity_age(row, now)
         if state == "running":
             if activity_age is None:
-                timing = "建立活动基线"
+                timing = "Establishing baseline"
             elif stalled:
-                timing = f"⚠ {human_duration(activity_age)}无更新"
+                timing = f"⚠ no update {human_duration(activity_age)}"
             else:
-                timing = f"更新 {human_duration(activity_age)}前"
+                timing = f"updated {human_duration(activity_age)} ago"
         else:
             timing = elapsed
         line = Table.grid(expand=True, padding=0)
@@ -1054,9 +1054,9 @@ def render_sessions(view: DashboardView, width: int, height: int) -> RenderableT
         content.append(Padding(meta, (0, 1)))
 
     if not rows:
-        empty = "没有匹配的会话"
+        empty = "No matching sessions"
         if view.query:
-            empty += f"：{view.query}"
+            empty += f": {view.query}"
         content.append(Padding(Text(f"·  {empty}", style=MUTED), (2, 2)))
 
     if len(rows) > len(shown):
@@ -1071,12 +1071,12 @@ def render_sessions(view: DashboardView, width: int, height: int) -> RenderableT
 
 def source_label(source: str) -> str:
     labels = {
-        "claude-session": "Claude 会话状态",
-        "codex-rollout": "Codex 生命周期日志",
-        "claude-hook": "Claude 原生 Hook",
-        "codex-hook": "Codex 原生 Hook",
-        "tmux": "tmux 交互界面",
-        "process": "进程兜底",
+        "claude-session": "Claude session state",
+        "codex-rollout": "Codex lifecycle log",
+        "claude-hook": "Claude native hook",
+        "codex-hook": "Codex native hook",
+        "tmux": "tmux interface",
+        "process": "Process fallback",
     }
     return labels.get(source, sanitize(source or "—", 80))
 
@@ -1140,22 +1140,22 @@ def preview_block(
 def tool_display_name(name: Any) -> str:
     value = sanitize(name, 100)
     labels = {
-        "exec": "执行终端命令",
-        "exec_command": "执行终端命令",
-        "apply_patch": "修改文件",
-        "bash": "执行 Bash",
-        "read": "读取文件",
-        "edit": "编辑文件",
-        "write": "写入文件",
-        "agent": "运行子 Agent",
-        "schedulewakeup": "等待定时唤醒",
-        "taskcreate": "创建任务",
-        "taskupdate": "更新任务",
-        "spawn_agent": "启动子 Agent",
-        "wait_agent": "等待子 Agent",
-        "send_message": "通知子 Agent",
-        "followup_task": "继续子任务",
-        "web__run": "查询网络",
+        "exec": "Run terminal command",
+        "exec_command": "Run terminal command",
+        "apply_patch": "Edit files",
+        "bash": "Run Bash",
+        "read": "Read file",
+        "edit": "Edit file",
+        "write": "Write file",
+        "agent": "Run sub-agent",
+        "schedulewakeup": "Wait for wakeup",
+        "taskcreate": "Create task",
+        "taskupdate": "Update task",
+        "spawn_agent": "Start sub-agent",
+        "wait_agent": "Wait for sub-agent",
+        "send_message": "Message sub-agent",
+        "followup_task": "Continue subtask",
+        "web__run": "Search the web",
     }
     return labels.get(value.lower(), value or "—")
 
@@ -1164,8 +1164,8 @@ def render_detail(view: DashboardView, width: int, height: int) -> RenderableTyp
     row = view.selected
     if row is None:
         return Panel(
-            Align.center(Text("选择一个会话查看详情", style=MUTED), vertical="middle"),
-            title="详情",
+            Align.center(Text("Select a session to view details", style=MUTED), vertical="middle"),
+            title="Details",
             title_align="left",
             box=box.MINIMAL,
             border_style=FAINT,
@@ -1177,7 +1177,7 @@ def render_detail(view: DashboardView, width: int, height: int) -> RenderableTyp
     stalled = is_stalled(row, view.snapshot.activity_stale_seconds, now)
     activity_age = last_activity_age(row, now)
     if stalled:
-        symbol, label, color = "⚠", "可能卡住", YELLOW
+        symbol, label, color = "⚠", "Possibly stalled", YELLOW
 
     heading = Text()
     heading.append(f"{symbol} ", style=f"bold {color}")
@@ -1192,25 +1192,25 @@ def render_detail(view: DashboardView, width: int, height: int) -> RenderableTyp
     duration = human_duration(now - float(row.get("state_since") or now))
     if state == "running":
         if activity_age is None:
-            activity_text = "建立活动基线中"
+            activity_text = "Establishing activity baseline"
         elif stalled:
-            activity_text = f"⚠ {human_duration(activity_age)} 无更新，可能卡住"
+            activity_text = f"⚠ no update for {human_duration(activity_age)}; possibly stalled"
         else:
-            activity_text = f"{human_duration(activity_age)} 前更新"
-        activity_text += f"  ·  持续 {duration}"
+            activity_text = f"updated {human_duration(activity_age)} ago"
+        activity_text += f"  ·  running for {duration}"
         lines.append(
-            detail_line("活动", activity_text, YELLOW if stalled else GREEN)
+            detail_line("Activity", activity_text, YELLOW if stalled else GREEN)
         )
     else:
-        lines.append(detail_line("持续", duration))
+        lines.append(detail_line("Duration", duration))
     lines.append(detail_line("tmux", tmux_location_label(row, 100) or "—", BLUE))
     socket_path = sanitize(row.get("tmux_socket") or "", 300)
     if socket_path and pathlib.Path(socket_path).name != "default" and height >= 24:
-        lines.append(detail_line("服务器", shorten_middle(socket_path, max(16, width - 12)), BLUE))
+        lines.append(detail_line("Server", shorten_middle(socket_path, max(16, width - 12)), BLUE))
     if height >= 20:
         process_text = f"PID {row.get('pid') or '—'}  ·  {source_label(str(row.get('source') or ''))}"
         lines.append(
-            detail_line("进程", shorten_middle(process_text, max(14, width - 12)))
+            detail_line("Process", shorten_middle(process_text, max(14, width - 12)))
         )
 
     session_key = str(row.get("session_key") or "")
@@ -1243,13 +1243,13 @@ def render_detail(view: DashboardView, width: int, height: int) -> RenderableTyp
     if user_entry:
         lines.append(
             preview_block(
-                "最近请求", user_entry, content_width, user_lines, ORANGE, "❯"
+                "Latest request", user_entry, content_width, user_lines, ORANGE, "❯"
             )
         )
     if assistant_entry:
         assistant_at = float(assistant_entry.get("at") or 0)
         user_at = float(user_entry.get("at") or 0) if user_entry else 0
-        assistant_label = "最近进展" if assistant_at >= user_at else "上一轮回复"
+        assistant_label = "Latest progress" if assistant_at >= user_at else "Previous reply"
         lines.append(
             preview_block(
                 assistant_label,
@@ -1271,14 +1271,14 @@ def render_detail(view: DashboardView, width: int, height: int) -> RenderableTyp
             float(assistant_entry.get("at") or 0) if assistant_entry else 0,
         )
         tool_label = (
-            "当前动作"
+            "Current action"
             if (
                 state == "running"
                 and tool_at
                 and tool_at >= latest_message_at
                 and now - tool_at < 120
             )
-            else "最近动作"
+            else "Last action"
         )
         lines.append(
             preview_block(
@@ -1292,24 +1292,24 @@ def render_detail(view: DashboardView, width: int, height: int) -> RenderableTyp
         )
     if not view.conversation_preview:
         privacy = Text()
-        privacy.append("隐私模式已开启\n", style=f"bold {MUTED}")
-        privacy.append("按 ", style=MUTED)
+        privacy.append("Conversation preview hidden\n", style=f"bold {MUTED}")
+        privacy.append("Press ", style=MUTED)
         privacy.append("p", style=f"bold {ORANGE}")
-        privacy.append(" 临时显示本机会话预览", style=MUTED)
+        privacy.append(" to show local session context", style=MUTED)
         lines.append(privacy)
     elif not any((user_entry, assistant_entry, tool_entry)):
-        lines.append(Text("·  暂无可用的对话预览", style=MUTED))
+        lines.append(Text("·  No conversation preview available", style=MUTED))
     if row.get("tmux_target") and state != "exited":
         if height >= 20:
             lines.append(Text(""))
         action = Text()
         action.append("Enter", style=f"bold {ORANGE}")
-        action.append(" 进入该 tmux 会话", style=MUTED)
+        action.append(" to open this tmux session", style=MUTED)
         lines.append(action)
 
     return Panel(
         Group(*lines),
-        title="会话预览",
+        title="Session preview",
         title_align="left",
         box=box.MINIMAL,
         border_style=color if state in {"needs_input", "error"} else FAINT,
@@ -1322,22 +1322,22 @@ def render_help(width: int) -> RenderableType:
     keys.add_column("key", style=f"bold {ORANGE}", no_wrap=True)
     keys.add_column("action", style=TEXT)
     for key, action in (
-        ("↑ / k", "上一个会话"),
-        ("↓ / j", "下一个会话"),
-        ("Enter", "进入所选 tmux 会话"),
-        ("/", "搜索项目、路径或会话"),
-        ("f", "切换 全部 / 需关注 / 运行中"),
-        ("p", "显示 / 隐藏本机会话预览"),
-        ("r", "立即刷新"),
-        ("g / G", "跳到首项 / 末项"),
-        ("?", "关闭本帮助"),
-        ("q", "关闭面板；守护进程继续运行"),
+        ("↑ / k", "Previous session"),
+        ("↓ / j", "Next session"),
+        ("Enter", "Open selected tmux session"),
+        ("/", "Search projects, paths, or sessions"),
+        ("f", "Cycle All / Attention / Running"),
+        ("p", "Show / hide local session preview"),
+        ("r", "Refresh now"),
+        ("g / G", "Jump to first / last"),
+        ("?", "Close this help"),
+        ("q", "Close dashboard; daemon keeps running"),
     ):
         keys.add_row(key, action)
     panel = Panel(
         keys,
-        title=" ✳ 快捷键 ",
-        subtitle=" Esc 或 ? 返回 ",
+        title=" ✳ Keyboard shortcuts ",
+        subtitle=" Esc or ? to return ",
         box=box.ROUNDED,
         border_style=ORANGE,
         width=min(62, max(36, width - 6)),
@@ -1351,10 +1351,10 @@ def render_footer(view: DashboardView, width: int, minimal: bool = False) -> Ren
     action_right = Text()
     if view.searching:
         action.append("❯ ", style=f"bold {ORANGE}")
-        action.append("搜索会话  ", style=MUTED)
+        action.append("Search sessions  ", style=MUTED)
         action.append(view.query, style=TEXT)
         action.append("█", style=ORANGE)
-        action.append("    Enter 确认 · Esc 清除", style=FAINT)
+        action.append("    Enter confirm · Esc clear", style=FAINT)
     elif view.flash and time.time() < view.flash_until:
         action.append("● ", style=YELLOW)
         action.append(view.flash, style=TEXT)
@@ -1381,7 +1381,7 @@ def render_footer(view: DashboardView, width: int, minimal: bool = False) -> Ren
             ):
                 action.append("  ·  ", style=FAINT)
                 action.append(
-                    f"{human_duration(activity_age)}前更新",
+                    f"updated {human_duration(activity_age)} ago",
                     style=(
                         YELLOW
                         if is_stalled(row, view.snapshot.activity_stale_seconds)
@@ -1389,17 +1389,17 @@ def render_footer(view: DashboardView, width: int, minimal: bool = False) -> Ren
                     ),
                 )
         else:
-            action.append("选择一个会话", style=MUTED)
+            action.append("Select a session", style=MUTED)
 
     shortcuts = Text(no_wrap=True, overflow="ellipsis")
     if width < 48:
-        items = [("↵", "打开"), ("↑↓", "选择"), ("f", "筛选"), ("q", "退出")]
+        items = [("↵", "open"), ("↑↓", "select"), ("f", "filter"), ("q", "quit")]
     else:
-        items = [("↑↓", "选择"), ("enter", "打开"), ("/", "搜索"), ("f", "筛选")]
+        items = [("↑↓", "select"), ("enter", "open"), ("/", "search"), ("f", "filter")]
     if width >= 120:
-        items.extend([("p", "预览"), ("r", "刷新"), ("?", "帮助")])
+        items.extend([("p", "preview"), ("r", "refresh"), ("?", "help")])
     if not any(key == "q" for key, _label in items):
-        items.append(("q", "退出"))
+        items.append(("q", "quit"))
     for index, (key, label) in enumerate(items):
         if index:
             shortcuts.append("  ·  ", style=FAINT)
@@ -1464,25 +1464,25 @@ def render_static(snapshot: DashboardSnapshot, width: int = 120) -> RenderableTy
     view = DashboardView(snapshot)
     rows = view.rows
     table = Table(box=box.SIMPLE, expand=True, header_style=f"bold {MUTED}")
-    table.add_column("状态", width=11, no_wrap=True)
+    table.add_column("Status", width=11, no_wrap=True)
     table.add_column("Agent", width=9, no_wrap=True)
-    table.add_column("项目", ratio=2, no_wrap=True, overflow="ellipsis")
+    table.add_column("Project", ratio=2, no_wrap=True, overflow="ellipsis")
     table.add_column("tmux", width=11, no_wrap=True)
-    table.add_column("持续", width=9, justify="right", no_wrap=True)
-    table.add_column("活动", width=13, justify="right", no_wrap=True)
-    table.add_column("来源", ratio=2, no_wrap=True, overflow="ellipsis")
+    table.add_column("Duration", width=9, justify="right", no_wrap=True)
+    table.add_column("Activity", width=13, justify="right", no_wrap=True)
+    table.add_column("Source", ratio=2, no_wrap=True, overflow="ellipsis")
     now = time.time()
     for row in rows:
         symbol, label, color = state_visual(str(row.get("state") or "unknown"))
         stalled = is_stalled(row, snapshot.activity_stale_seconds, now)
         if stalled:
-            symbol, label, color = "⚠", "可能卡住", YELLOW
+            symbol, label, color = "⚠", "Possibly stalled", YELLOW
         provider, provider_color = provider_label(str(row.get("provider") or ""))
         age = last_activity_age(row, now)
         activity = "—"
         activity_color = MUTED
         if str(row.get("state") or "") == "running":
-            activity = "建立基线" if age is None else f"{human_duration(age)} 前"
+            activity = "Establishing baseline" if age is None else f"{human_duration(age)} ago"
             activity_color = YELLOW if stalled else GREEN
         table.add_row(
             Text(f"{symbol} {label}", style=color),
@@ -1494,7 +1494,7 @@ def render_static(snapshot: DashboardSnapshot, width: int = 120) -> RenderableTy
             Text(source_label(str(row.get("source") or ""))),
         )
     if not rows:
-        table.add_row("·", "", "暂无会话", "", "", "", "")
+        table.add_row("·", "", "No sessions", "", "", "", "")
     return Group(render_header(view, width), Padding(table, (0, 1)))
 
 
@@ -1584,12 +1584,12 @@ def _current_tmux_socket() -> str:
 
 def switch_to_session(row: Mapping[str, Any]) -> tuple[bool, str]:
     if str(row.get("state") or "") == "exited":
-        return False, "该进程已退出；tmux 字段仅表示它最后所在的位置"
+        return False, "This process has exited; the tmux field shows only its last location"
     target = _command_value(row.get("tmux_target") or "", 200)
     pane_id = _command_value(row.get("pane_id") or "", 80)
     target_socket = _command_value(row.get("tmux_socket") or "", 1000)
     if not target:
-        return False, "这个会话没有可进入的 tmux 位置"
+        return False, "This session has no tmux location to open"
     locator = pane_id if pane_id.startswith("%") else target
     try:
         source_socket = _current_tmux_socket() if os.environ.get("TMUX") else ""
@@ -1613,7 +1613,7 @@ def switch_to_session(row: Mapping[str, Any]) -> tuple[bool, str]:
                 check=False,
             )
             if check.returncode != 0 or sanitize(check.stdout, 200) != target:
-                return False, "tmux 位置已失效，等待监控刷新后再试"
+                return False, "The tmux location is stale; wait for a monitor refresh and try again"
         if os.environ.get("TMUX"):
             if target_socket and os.path.realpath(target_socket) != os.path.realpath(
                 source_socket
@@ -1621,7 +1621,7 @@ def switch_to_session(row: Mapping[str, Any]) -> tuple[bool, str]:
                 command = shlex.join(
                     ["tmux", "-S", target_socket, "attach", "-t", locator]
                 )
-                return False, f"目标在另一个 tmux server；请在终端运行：{command}"
+                return False, f"Target is on another tmux server; run this in a terminal: {command}"
             source_base = _tmux_base(source_socket)
             source_pane = _command_value(os.environ.get("TMUX_PANE", ""), 80)
             clients = subprocess.run(
@@ -1641,7 +1641,7 @@ def switch_to_session(row: Mapping[str, Any]) -> tuple[bool, str]:
                     ):
                         candidates.append(tty_name)
             if len(candidates) != 1:
-                return False, "多个客户端正在查看此面板，无法确定要切换哪一个"
+                return False, "Multiple clients are viewing this dashboard; cannot choose which one to switch"
             run = subprocess.run(
                 source_base
                 + ["switch-client", "-c", candidates[0], "-t", locator],
@@ -1654,7 +1654,7 @@ def switch_to_session(row: Mapping[str, Any]) -> tuple[bool, str]:
             run = subprocess.run(base + ["attach-session", "-t", locator], check=False)
         if run.returncode == 0:
             return True, ""
-        return False, sanitize(getattr(run, "stderr", "") or "无法进入 tmux 会话", 200)
+        return False, sanitize(getattr(run, "stderr", "") or "Unable to open tmux session", 200)
     except (OSError, subprocess.SubprocessError) as exc:
         return False, sanitize(exc, 200)
 
@@ -1733,9 +1733,9 @@ def handle_key(view: DashboardView, key: str, text: str, page_size: int) -> str:
         view.conversation_preview = not view.conversation_preview
         if not view.conversation_preview:
             view.set_context("", {})
-            view.set_flash("会话预览已隐藏")
+            view.set_flash("Session preview hidden")
         else:
-            view.set_flash("会话预览已显示；内容仅从本机读取")
+            view.set_flash("Session preview shown; content is read locally only")
     elif key == "text" and text == "r":
         return "refresh"
     elif key == "text" and text == "?":
@@ -1884,7 +1884,7 @@ def run_dashboard(
                         if action == "attach":
                             attach_row = view.selected
                             if attach_row is None:
-                                view.set_flash("没有选中的会话")
+                                view.set_flash("No session selected")
                             else:
                                 break
                         if action == "refresh":
@@ -1903,7 +1903,7 @@ def run_dashboard(
             if attach_row is not None:
                 ok, message = switch_to_session(attach_row)
                 if not ok:
-                    view.set_flash(message or "无法进入 tmux 会话")
+                    view.set_flash(message or "Unable to open tmux session")
         signum = int(signal_state["terminate"] or 0)
         return 128 + signum if signum else 0
     finally:

@@ -76,6 +76,14 @@ records. Concurrency changes need tests with independent SQLite connections.
 Terminal changes need ANSI/control-character, CJK width, narrow-screen, and tmux
 ambiguity cases.
 
+Regenerate the README screenshot only from the committed synthetic fixture:
+
+```bash
+python scripts/render-demo.py
+```
+
+Never capture a live dashboard for repository documentation.
+
 Manual tests should use disposable tmux sockets/sessions and must clean them up.
 Do not make tests depend on network access, live APIs, or a developer's real home
 directory.

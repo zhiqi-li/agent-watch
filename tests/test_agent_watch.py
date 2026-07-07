@@ -19,6 +19,45 @@ from agent_watch import core as aw
 
 
 class AgentWatchTests(unittest.TestCase):
+    def test_core_notification_copy_is_english(self):
+        row = {
+            "provider": "codex",
+            "tmux_target": "work:1.0",
+            "tmux_socket": "/tmp/tmux-test/default",
+            "pane_id": "%1",
+            "cwd": "/work/project",
+            "name": "project",
+            "state": "needs_input",
+            "message": "private prompt",
+            "pid": 123,
+        }
+        title, body, payload = aw.format_notification([row], aw.DEFAULT_CONFIG)
+        self.assertEqual(title, "Codex · Needs your response or approval")
+        self.assertIn("Host:", body)
+        self.assertIn("Project: project", body)
+        self.assertEqual(
+            payload["events"][0]["state_label"],
+            "Needs your response or approval",
+        )
+        visible_copy = (
+            title
+            + body
+            + "".join(aw.STATE_LABELS.values())
+            + "".join(aw.SHORT_LABELS.values())
+        )
+        self.assertFalse(any("\u4e00" <= character <= "\u9fff" for character in visible_copy))
+
+    def test_plain_status_copy_is_english(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = Namespace(state_dir=tmp, json=False, full=False)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(aw.status_command(args, aw.DEFAULT_CONFIG), 0)
+        rendered = output.getvalue()
+        self.assertIn("daemon: stopped", rendered)
+        self.assertIn("No monitored sessions yet.", rendered)
+        self.assertFalse(any("\u4e00" <= character <= "\u9fff" for character in rendered))
+
     def test_replayed_attention_hook_is_deduplicated(self):
         payload = {
             "hook_event_name": "Notification",

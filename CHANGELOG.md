@@ -9,6 +9,20 @@ experimental.
 
 No changes yet.
 
+## [0.2.1] - 2026-07-07
+
+### Added
+
+- A reproducible README dashboard screenshot generated entirely from synthetic
+  session data, with a regression test that prevents real host data from being
+  committed to the image.
+
+### Changed
+
+- English is now the default language for the TUI, CLI messages, notifications,
+  README, and example configuration.
+- The Chinese guide is retained as a separate translation under `docs/`.
+
 ## [0.2.0] - 2026-07-07
 
 ### Added
@@ -49,5 +63,6 @@ No changes yet.
 - Configuration values are type/range checked, UI-only mode does not retry an
   empty notification set, and daemon liveness is separated from scan success.
 
-[Unreleased]: https://github.com/zhiqi-li/agent-watch/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/zhiqi-li/agent-watch/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/zhiqi-li/agent-watch/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/zhiqi-li/agent-watch/releases/tag/v0.2.0
