@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=77", "wheel", "packaging>=24.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-watch"
+dynamic = ["version"]
+description = "Monitor local Codex CLI and Claude Code sessions and notify when they need attention"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+  { name = "Agent Watch contributors" },
+]
+keywords = ["codex", "claude-code", "monitoring", "notifications", "tmux", "tui"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development",
+  "Topic :: System :: Monitoring",
+]
+dependencies = [
+  "rich>=13,<15",
+]
+
+[project.urls]
+Homepage = "https://github.com/zhiqi-li/agent-watch"
+Repository = "https://github.com/zhiqi-li/agent-watch.git"
+Issues = "https://github.com/zhiqi-li/agent-watch/issues"
+Changelog = "https://github.com/zhiqi-li/agent-watch/blob/main/CHANGELOG.md"
+
+[project.scripts]
+agent-watch = "agent_watch.core:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.dynamic]
+version = { attr = "agent_watch.__version__" }

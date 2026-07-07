@@ -1,0 +1,26 @@
+[Unit]
+Description=Monitor Codex CLI and Claude Code sessions
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/agent-watch daemon
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=15s
+KillSignal=SIGTERM
+Environment=PYTHONUNBUFFERED=1
+UMask=0077
+
+# Agent Watch must share the host's /tmp to discover tmux server sockets and
+# must retain normal /proc visibility to discover same-user agent processes.
+PrivateTmp=false
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=default.target

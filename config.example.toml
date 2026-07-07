@@ -1,0 +1,58 @@
+[monitor]
+interval_seconds = 5
+ready_delay_seconds = 12
+missing_grace_seconds = 10
+notify_existing = true
+needs_input_repeat_seconds = 1800
+capture_lines = 80
+tmux_fallback_interval_seconds = 6
+tmux_fallback = true
+# 运行中超过这个时间没有终端输出、rollout 或 transcript 更新时，UI 标记“可能卡住”。
+activity_stale_seconds = 600
+# 已投递通知与过期会话的本地历史保留天数；待重试通知不会被清理。
+retention_days = 30
+process_exit_notifications = true
+ignore_tmux_sessions = ["agent-watch"]
+
+[ui]
+# 会话文本可能出现在共享终端、录屏或截图中，因此公开安装默认关闭。
+# UI 内可随时按 p 临时显示或隐藏。
+conversation_preview = false
+
+[notifications]
+console = true
+tmux = true
+desktop = false
+timeout_seconds = 6
+include_cwd = false
+# 默认不把提示词、命令或回答正文发到远端。
+include_message_preview = false
+# 默认不向 webhook/ntfy/Telegram/Bark 发送 tmux socket 绝对路径或 pane ID。
+include_tmux_socket = false
+# 只有自建 HTTP 服务确实无法启用 TLS 时才打开；会允许明文发送通知数据。
+allow_insecure_http = false
+
+# 自定义命令会收到一个 JSON 对象（stdin），不会经 shell 执行。
+[notifications.command]
+argv = []
+# argv = ["/usr/local/bin/my-notifier"]
+
+# 通用 JSON POST webhook。
+[notifications.webhook]
+url = ""
+bearer_token = ""
+
+# 推荐的轻量手机推送。url 应包含主题，例如：
+# https://ntfy.sh/a-long-random-private-topic
+[notifications.ntfy]
+url = ""
+token = ""
+priority = "high"
+
+[notifications.telegram]
+bot_token = ""
+chat_id = ""
+
+# Bark 可直接填完整推送 URL。
+[notifications.bark]
+url = ""

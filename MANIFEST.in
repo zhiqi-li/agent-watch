@@ -1,0 +1,10 @@
+include CHANGELOG.md
+include CONTRIBUTING.md
+include LICENSE
+include PRIVACY.md
+include README.md
+include SECURITY.md
+include config.example.toml
+recursive-include scripts agent-watch
+recursive-include systemd *.service
+recursive-include tests *.py

@@ -1,0 +1,41 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tmp/
+.coverage
+.coverage.*
+htmlcov/
+
+# Packaging output
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local configuration, credentials, and runtime state
+.env
+.env.*
+!.env.example
+config.toml
+agent-watch.toml
+*.sqlite3
+*.sqlite3-*
+*.db-wal
+*.db-shm
+*.log
+*.agent-watch-backup-*
+
+# Editors and operating systems
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
