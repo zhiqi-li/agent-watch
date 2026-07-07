@@ -37,6 +37,14 @@ include_tmux_socket = false
 # notification data to be sent over plaintext HTTP.
 allow_insecure_http = false
 
+# Show native toasts inside Cursor/VS Code through the companion extension.
+# Leave socket empty unless the extension uses a custom agentWatch.socketPath.
+[notifications.cursor]
+enabled = false
+socket = ""
+# Explicitly opt in to a bounded latest-user-prompt excerpt in Cursor toasts.
+include_prompt = false
+
 # A custom command receives one JSON object on stdin and is never invoked
 # through a shell. Prefer an absolute executable path.
 [notifications.command]

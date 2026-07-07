@@ -36,7 +36,8 @@ prompts, paths, tmux locations, or other user data.
   preview panel. Conversation preview is hidden by default and can be toggled
   temporarily with `p`.
 - Uses a SQLite outbox for deduplication and retries, with console, tmux,
-  desktop, ntfy, Telegram, webhook, Bark, and custom-command delivery.
+  desktop, native Cursor/VS Code toasts, ntfy, Telegram, webhook, Bark, and
+  custom-command delivery.
 - Conservatively marks a running session as "possibly stalled" after a
   configurable period with no terminal or session-file activity. This is a
   hint, not a failure verdict.
@@ -125,6 +126,11 @@ include_message_preview = false
 include_tmux_socket = false
 allow_insecure_http = false
 
+[notifications.cursor]
+enabled = false
+socket = ""
+include_prompt = false
+
 [notifications.ntfy]
 url = ""
 token = ""
@@ -140,6 +146,49 @@ explicitly configure. Public ntfy topic names can behave like bearer
 credentials; use a long random topic with authentication or a private server
 for sensitive work. Plain HTTP endpoints are rejected unless
 `allow_insecure_http = true` is explicitly set.
+
+### Cursor and VS Code native notifications
+
+The companion workspace extension under [cursor-extension](cursor-extension/)
+shows Agent Watch events as native editor toasts. It runs on the workspace
+extension host, so it also works when Agent Watch is running on the far side of
+a Cursor Remote SSH connection.
+
+Build the dependency-free VSIX from a checkout and install it from the Cursor
+terminal connected to the target host:
+
+```bash
+VSIX="$(python3 scripts/package_cursor_extension.py)"
+cursor --install-extension "$VSIX" --force
+```
+
+Reload the Cursor window if the extension does not activate immediately. Then
+enable the channel in `~/.config/agent-watch/config.toml`:
+
+```toml
+[notifications.cursor]
+enabled = true
+socket = ""
+include_prompt = true
+```
+
+Restart the daemon and run `agent-watch test-notification`. The default private
+socket is `~/.local/state/agent-watch/cursor-notify.sock`; the extension creates
+it with mode `0600`. Use the same absolute `socket`/
+`agentWatch.socketPath` value on both sides only when overriding the default.
+Toasts omit the opaque host/container ID and show the state, tmux target, and—
+only when `include_prompt = true`—a bounded latest-user-prompt excerpt.
+**Details** opens the complete notification body in the Agent Watch output
+channel. Prompt excerpts remain disabled by default because they may contain
+sensitive text.
+The command palette entries **Agent Watch: Test Cursor Notification** and
+**Agent Watch: Show Output** help diagnose extension-side problems.
+
+Uninstall the companion with:
+
+```bash
+cursor --uninstall-extension agent-watch.agent-watch-cursor-notifications
+```
 
 ## Running the daemon
 
@@ -199,6 +248,7 @@ agent-watch status --json         # redacted, machine-readable status
 agent-watch status --json --full  # sensitive paths, IDs, and message fields
 agent-watch daemon --once --no-notify-existing
 agent-watch test-notification
+agent-watch cursor-notify --help  # low-level Cursor bridge troubleshooting
 agent-watch clear-history --yes       # stop the daemon first
 ```
 
@@ -271,6 +321,7 @@ Current tested matrix:
 | Python | 3.12.3 | Supported target is 3.11+ |
 | Rich | 14 | TUI rendering |
 | tmux | 3.4 | Default and custom sockets |
+| Cursor | 3.6.31 | Companion extension on Remote SSH |
 | Codex CLI | 0.142.5 | Rollout events and hooks |
 | Claude Code | 2.1.202 | Session/transcript files and hooks |
 
@@ -292,6 +343,9 @@ conversation text, tokens, configuration, databases, or transcripts.
 - **Remote notifications fail:** run `agent-watch test-notification`, then check
   the configured URL, token, proxy, firewall, and HTTPS policy. Failed delivery
   is retried with exponential backoff.
+- **Cursor notifications fail:** confirm that the companion is installed on the
+  workspace/SSH host, run **Agent Watch: Show Output**, and verify that its
+  socket path matches `[notifications.cursor].socket`.
 - **The UI cannot enter a tmux pane:** the pane may have disappeared, may live
   on another tmux server, or multiple clients may be viewing the dashboard.
   Follow the complete manual command shown by the UI.

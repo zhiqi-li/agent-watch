@@ -6,6 +6,7 @@ include README.md
 include SECURITY.md
 include config.example.toml
 recursive-include docs *.md *.svg
+recursive-include cursor-extension *.json *.js *.md LICENSE
 recursive-include scripts *.py agent-watch
 recursive-include systemd *.service
 recursive-include tests *.py

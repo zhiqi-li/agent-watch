@@ -9,6 +9,13 @@ experimental.
 
 ### Added
 
+- A companion Cursor/VS Code workspace extension and first-class `cursor`
+  notification channel. A private same-user Unix socket carries bounded,
+  editor-specific payloads from local or Remote SSH Agent Watch daemons to native
+  toasts, with outbox retries when the extension is unavailable. Opaque host IDs
+  are omitted; bounded latest-user-prompt excerpts require an explicit opt-in.
+- A dependency-free VSIX packaging script and a low-level `cursor-notify` bridge
+  command for diagnostics and custom integrations.
 - An exited-session history page, opened from a single `Exited sessions` entry
   at the bottom of the dashboard. Enter resumes an available record with its
   original working directory and provider session ID in a new, independent tmux

@@ -68,6 +68,8 @@ Run the complete suite before submitting a pull request:
 ```bash
 python -m unittest discover -s tests -v
 python -m compileall -q .
+npm --prefix cursor-extension run check
+python scripts/package_cursor_extension.py
 ```
 
 New behavior should include focused tests for success and failure paths. Provider

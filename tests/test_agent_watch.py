@@ -555,7 +555,13 @@ class AgentWatchTests(unittest.TestCase):
             )
             calls = []
 
-            def fake_send(rows, _config, skip_channels=None):
+            def fake_send(
+                rows,
+                _config,
+                skip_channels=None,
+                state_dir=aw.DEFAULT_STATE_DIR,
+            ):
+                del state_dir
                 skip = set(skip_channels or set())
                 calls.append((sorted(row["session_key"] for row in rows), skip))
                 if "telegram" in skip:

@@ -181,6 +181,27 @@ class RemoteNotificationPrivacyTests(unittest.TestCase):
 
 
 class StateStorageSecurityTests(unittest.TestCase):
+    def test_cursor_prompt_opt_in_does_not_persist_session_message_in_outbox(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = aw.StateDB(pathlib.Path(tmp))
+            obs = observation("codex:cursor-prompt", "needs_input", time.time())
+            obs.message = "private hook message"
+            db.upsert(obs)
+            config = aw.deep_merge(
+                aw.DEFAULT_CONFIG,
+                {
+                    "notifications": {
+                        "cursor": {"enabled": True, "include_prompt": True}
+                    }
+                },
+            )
+            self.assertTrue(db.enqueue_session_now(obs.key, config))
+            snapshot = json.loads(
+                db.conn.execute("SELECT snapshot_json FROM outbox").fetchone()[0]
+            )
+            self.assertEqual(snapshot["message"], "")
+            db.close()
+
     def test_clear_history_removes_database_spool_and_error_log(self):
         with tempfile.TemporaryDirectory() as tmp:
             state = pathlib.Path(tmp)

@@ -28,7 +28,9 @@ The default state directory is `~/.local/state/agent-watch/`. It contains:
   snapshots, delivery results, and notification history;
 - `spool/` files used when a hook cannot briefly acquire SQLite;
 - `hook-errors.log` when hook ingestion fails;
-- the daemon lock file and SQLite WAL/SHM files.
+- the daemon lock file and SQLite WAL/SHM files;
+- `cursor-notify.sock` while the optional Cursor companion extension is active.
+  This Unix socket endpoint does not persist notification payloads.
 
 The conversation preview shown in the right-hand TUI panel is read on demand and
 cached only in dashboard process memory. It is not written to SQLite. The preview
@@ -44,24 +46,35 @@ and the hook error log.
 ## Data sent elsewhere
 
 By default, notification output is local console/tmux only. Agent Watch invokes
-an external delivery action only when the operator enables desktop delivery, a
-command, webhook, ntfy, Telegram, or Bark. Network requests are limited to the
-configured webhook, ntfy, Telegram, and Bark channels.
+an external delivery action only when the operator enables desktop, Cursor, a
+command, webhook, ntfy, Telegram, or Bark delivery. Network requests are limited
+to the configured webhook, ntfy, Telegram, and Bark channels.
 
 Remote notification payloads normally include host name, provider, derived state,
-project name, timestamp, and `session:window.pane`. Full tmux socket paths and
-pane IDs are not sent by default. The following are opt-in:
+project name, timestamp, and `session:window.pane`. The optional Cursor channel
+uses a separate editor-only payload over a private same-user Unix socket. It
+omits the host name and can include a bounded latest user-prompt excerpt only
+after a separate opt-in. Full tmux socket paths and pane IDs are not sent by
+default. The following are opt-in:
 
 ```toml
 [notifications]
 include_cwd = false
 include_message_preview = false
 include_tmux_socket = false
+
+[notifications.cursor]
+include_prompt = false
 ```
 
-Setting either option to `true` can disclose local paths or message excerpts to
-every enabled remote channel. A custom command receives the notification JSON on
-stdin. Delivery attempts and endpoint result summaries are retained locally.
+Setting a corresponding option to `true` can disclose local paths or message
+excerpts to every enabled notification channel. A custom command receives the
+notification JSON on stdin. Delivery attempts and endpoint result summaries are
+retained locally.
+
+Cursor toasts are compact by default. Selecting their **Details** action writes
+the complete notification body to the Agent Watch Output channel; Cursor may
+retain that Output content in its extension-host logs.
 
 Third-party services apply their own privacy policies and retention. Public ntfy
 topic names can function like bearer credentials; use a long random topic with

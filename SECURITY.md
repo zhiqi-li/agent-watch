@@ -62,6 +62,11 @@ they do not make untrusted same-user data safe in every environment.
   `agent-watch uninstall-hooks`.
 - A configured custom notification command executes with the daemon user's
   privileges. Use an absolute executable path and audit it.
+- Install the Cursor companion only on the workspace host that runs Agent Watch.
+  Keep its socket directory `0700` and socket `0600`; custom socket paths must be
+  absolute and owned by the same Unix user.
+- Keep `notifications.cursor.include_prompt=false` unless showing recent user
+  prompt text in Cursor notifications is acceptable for that workspace.
 - Do not expose the SQLite database, daemon socket namespace, or dashboard to
   other users.
 - Keep Codex CLI and Claude Code versions within the tested matrix, and verify
@@ -71,6 +76,9 @@ they do not make untrusted same-user data safe in every environment.
 
 - Notification delivery cannot be exactly-once across process crashes and remote
   services that do not support idempotency keys. A rare duplicate is possible.
+- The Cursor socket protects against other Unix users through filesystem modes
+  and peer checks. Processes already running as the Agent Watch user remain
+  inside the project's trust boundary.
 - tmux prompt detection is text-based fallback logic and can miss or misclassify
   changed upstream UI wording.
 - Local history is pruned after the configured retention window, but pending

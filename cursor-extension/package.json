@@ -1,0 +1,71 @@
+{
+  "name": "agent-watch-cursor-notifications",
+  "displayName": "Agent Watch Notifications",
+  "description": "Show Agent Watch events as native Cursor or VS Code notifications.",
+  "version": "0.1.3",
+  "publisher": "agent-watch",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "agent-watch",
+    "cursor",
+    "notifications",
+    "remote-ssh"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:agentWatch.showSocketPath",
+    "onCommand:agentWatch.showOutput",
+    "onCommand:agentWatch.testCursorNotification"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "agentWatch.showSocketPath",
+        "title": "Agent Watch: Show Cursor Notification Socket Path"
+      },
+      {
+        "command": "agentWatch.showOutput",
+        "title": "Agent Watch: Show Output"
+      },
+      {
+        "command": "agentWatch.testCursorNotification",
+        "title": "Agent Watch: Test Cursor Notification"
+      }
+    ],
+    "configuration": {
+      "title": "Agent Watch",
+      "properties": {
+        "agentWatch.socketPath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Absolute Unix socket path used for Agent Watch notifications. Leave empty to use $AGENT_WATCH_CURSOR_SOCKET, $AGENT_WATCH_STATE_DIR/cursor-notify.sock, or ~/.local/state/agent-watch/cursor-notify.sock. The parent directory must be private (mode 0700)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "check": "node --check extension.js && node --check protocol.js && node --test test/*.test.js",
+    "test": "node --test test/*.test.js",
+    "package": "python3 ../scripts/package_cursor_extension.py"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zhiqi-li/agent-watch.git",
+    "directory": "cursor-extension"
+  },
+  "bugs": {
+    "url": "https://github.com/zhiqi-li/agent-watch/issues"
+  },
+  "homepage": "https://github.com/zhiqi-li/agent-watch#readme"
+}

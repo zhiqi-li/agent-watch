@@ -31,6 +31,7 @@ import signal
 import socket
 import sqlite3
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -83,6 +84,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "include_message_preview": False,
         "include_tmux_socket": False,
         "allow_insecure_http": False,
+        "cursor": {"enabled": False, "socket": "", "include_prompt": False},
         "command": {"argv": []},
         "webhook": {"url": "", "bearer_token": ""},
         "ntfy": {"url": "", "token": "", "priority": "high"},
@@ -126,6 +128,22 @@ CODEX_ROLLOUT_CACHE: dict[tuple[int, str], tuple[pathlib.Path, str]] = {}
 CODEX_LIFECYCLE_CACHE: dict[str, tuple[int, int, tuple[str, str, str]]] = {}
 CLAUDE_TRANSCRIPT_CACHE: dict[str, pathlib.Path] = {}
 PANE_CAPTURE_CACHE: dict[tuple[str, str], tuple[float, str]] = {}
+CURSOR_SOCKET_GENERATIONS: dict[str, tuple[int, int]] = {}
+CURSOR_PROMPT_LOADER: Any | None = None
+
+CURSOR_NOTIFY_SOCKET_NAME = "cursor-notify.sock"
+CURSOR_NOTIFY_MAX_PAYLOAD_BYTES = 256 * 1024
+CURSOR_NOTIFY_MAX_ACK_BYTES = 4 * 1024
+CURSOR_NOTIFY_DEFAULT_TIMEOUT = 2.0
+CURSOR_NOTIFY_MAX_TIMEOUT = 30.0
+
+
+class CursorNotifyInputError(ValueError):
+    """The Cursor notification request or local endpoint is unsafe/invalid."""
+
+
+class CursorNotifyDeliveryError(RuntimeError):
+    """The Cursor extension could not accept a valid notification request."""
 
 
 def utc_now() -> float:
@@ -248,6 +266,16 @@ def validate_config(config: Mapping[str, Any]) -> None:
     argv = command.get("argv")
     if not isinstance(argv, list) or not all(isinstance(item, str) for item in argv):
         raise ValueError("notifications.command.argv must be an array of strings")
+
+    cursor = notifications.get("cursor", {})
+    if not isinstance(cursor, Mapping):
+        raise ValueError("notifications.cursor must be a TOML table")
+    if not isinstance(cursor.get("enabled"), bool):
+        raise ValueError("notifications.cursor.enabled must be true or false")
+    if not isinstance(cursor.get("socket"), str):
+        raise ValueError("notifications.cursor.socket must be a string")
+    if not isinstance(cursor.get("include_prompt"), bool):
+        raise ValueError("notifications.cursor.include_prompt must be true or false")
 
     allow_http = notifications["allow_insecure_http"]
     for channel in ("webhook", "ntfy", "bark"):
@@ -911,6 +939,34 @@ class StateDB:
                     (now + delay, attempts, delivered_json, item["event_key"]),
                 )
         self.conn.commit()
+
+    def wake_failed_channel(self, channel: str, now: float | None = None) -> int:
+        """Make delayed failures due when a local channel gets a new listener."""
+        now = utc_now() if now is None else now
+        rows = self.conn.execute(
+            """SELECT event_key, delivered_json FROM outbox
+               WHERE sent_at IS NULL AND available_at>?""",
+            (now,),
+        ).fetchall()
+        keys: list[str] = []
+        for row in rows:
+            try:
+                delivered = json.loads(row["delivered_json"])
+            except (TypeError, ValueError):
+                continue
+            if (
+                isinstance(delivered, Mapping)
+                and channel in delivered
+                and not channel_succeeded(delivered[channel])
+            ):
+                keys.append(str(row["event_key"]))
+        if keys:
+            self.conn.executemany(
+                "UPDATE outbox SET available_at=? WHERE event_key=?",
+                ((now, key) for key in keys),
+            )
+            self.conn.commit()
+        return len(keys)
 
     def resolve_attention(
         self,
@@ -1819,6 +1875,115 @@ def format_notification(
     return title, body, payload
 
 
+def cursor_prompt_for_row(row: Mapping[str, Any]) -> str:
+    """Return a bounded latest user prompt, falling back to the hook message."""
+    global CURSOR_PROMPT_LOADER
+    try:
+        if CURSOR_PROMPT_LOADER is None:
+            # The dashboard loader already enforces history-root containment,
+            # owner checks, bounded reverse reads, and user-message filtering.
+            from .dashboard import ConversationPreviewLoader
+
+            CURSOR_PROMPT_LOADER = ConversationPreviewLoader(refresh_seconds=1.0)
+        preview = CURSOR_PROMPT_LOADER.load(row)
+        user = preview.get("user", {}) if isinstance(preview, Mapping) else {}
+        if isinstance(user, Mapping):
+            prompt = clean_text(user.get("text"), 220)
+            if prompt:
+                return prompt
+    except (ImportError, OSError, TypeError, ValueError):
+        pass
+    if mapping_value(row, "source", "") == "manual-test":
+        return clean_text(mapping_value(row, "message", ""), 220)
+    return ""
+
+
+def cursor_tmux_label(row: Mapping[str, Any]) -> str:
+    target = clean_text(mapping_value(row, "tmux_target", ""), 200)
+    if not target:
+        return ""
+    socket_path = str(mapping_value(row, "tmux_socket", "") or "")
+    socket_name = pathlib.PurePath(socket_path).name if socket_path else ""
+    if socket_name and socket_name != "default":
+        return f"{socket_name}/{target}"
+    return target
+
+
+def format_cursor_notification(
+    rows: Sequence[Mapping[str, Any]],
+    config: Mapping[str, Any],
+    title: str,
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the editor-only payload: tmux and optional prompt, never host."""
+    cursor = config["notifications"].get("cursor", {})
+    include_prompt = bool(
+        isinstance(cursor, Mapping) and cursor.get("include_prompt", False)
+    )
+    source_events = payload.get("events", [])
+    events: list[dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        source = (
+            source_events[index]
+            if isinstance(source_events, list)
+            and index < len(source_events)
+            and isinstance(source_events[index], Mapping)
+            else {}
+        )
+        event = {
+            key: source[key]
+            for key in (
+                "provider",
+                "project",
+                "state",
+                "state_label",
+                "time",
+            )
+            if key in source
+        }
+        event["tmux_target"] = cursor_tmux_label(row)
+        if include_prompt and index < 3:
+            prompt = cursor_prompt_for_row(row)
+            event["prompt"] = prompt or "unavailable — open the tmux pane"
+        events.append(event)
+
+    lines: list[str] = []
+    if len(events) == 1:
+        event = events[0]
+        if event.get("tmux_target"):
+            lines.append(f"tmux: {event['tmux_target']}")
+        elif event.get("project"):
+            lines.append(f"Project: {event['project']}")
+        if event.get("prompt"):
+            lines.append(f"Prompt: {event['prompt']}")
+    else:
+        for event in events[:3]:
+            provider = {"codex": "Codex", "claude": "Claude"}.get(
+                str(event.get("provider") or ""), "Agent"
+            )
+            state = event.get("state_label") or event.get("state") or "Attention"
+            location = (
+                f"tmux {event['tmux_target']}"
+                if event.get("tmux_target")
+                else str(event.get("project") or "unknown")
+            )
+            line = f"{provider} · {state} · {location}"
+            if event.get("prompt"):
+                line += f" · Prompt: {event['prompt']}"
+            lines.append(line)
+        if len(events) > 3:
+            lines.append(f"+{len(events) - 3} more")
+
+    return {
+        "app": APP_NAME,
+        "version": VERSION,
+        "title": title,
+        "body": "\n".join(lines) or title,
+        "events": events,
+        "created_at": payload.get("created_at", iso_time()),
+    }
+
+
 class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> None:
         return None
@@ -1870,10 +2035,231 @@ def http_json(
         return False, clean_text(exc, 200)
 
 
+def cursor_notify_socket_path(
+    state_dir: str | pathlib.Path,
+    requested: str | None = None,
+) -> pathlib.Path:
+    """Resolve the Cursor bridge socket without accepting ambiguous paths."""
+    if requested is not None:
+        raw_path = requested
+        if not raw_path:
+            raise CursorNotifyInputError("--socket must not be empty")
+    else:
+        raw_path = os.environ.get("AGENT_WATCH_CURSOR_SOCKET", "")
+        if not raw_path:
+            raw_path = os.fspath(pathlib.Path(state_dir) / CURSOR_NOTIFY_SOCKET_NAME)
+    if "\x00" in raw_path:
+        raise CursorNotifyInputError("Cursor socket path contains a NUL byte")
+    path = pathlib.Path(raw_path).expanduser()
+    if not path.is_absolute():
+        raise CursorNotifyInputError("Cursor socket path must be absolute")
+    return path
+
+
+def _strict_json_object(raw: bytes, description: str) -> dict[str, Any]:
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"non-finite JSON number: {value}")
+
+    try:
+        text = raw.decode("utf-8")
+        value = json.loads(text, parse_constant=reject_constant)
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+        raise ValueError(f"{description} must be one valid UTF-8 JSON object") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"{description} must be a JSON object")
+    return value
+
+
+def read_cursor_notification(
+    stream: Any | None = None,
+    max_bytes: int = CURSOR_NOTIFY_MAX_PAYLOAD_BYTES,
+) -> dict[str, Any]:
+    """Read exactly one bounded notification object from stdin-like input."""
+    if stream is None:
+        stream = getattr(sys.stdin, "buffer", sys.stdin)
+    try:
+        incoming = stream.read(max_bytes + 1)
+    except OSError as exc:
+        raise CursorNotifyInputError(
+            f"could not read notification payload: {clean_text(exc, 160)}"
+        ) from exc
+    if isinstance(incoming, str):
+        raw = incoming.encode("utf-8")
+    elif isinstance(incoming, (bytes, bytearray)):
+        raw = bytes(incoming)
+    else:
+        raise CursorNotifyInputError("notification input must be text or bytes")
+    if len(raw) > max_bytes:
+        raise CursorNotifyInputError(
+            f"notification payload exceeds {max_bytes} bytes"
+        )
+    if not raw.strip():
+        raise CursorNotifyInputError("notification payload is empty")
+    try:
+        payload = _strict_json_object(raw, "notification payload")
+    except ValueError as exc:
+        raise CursorNotifyInputError(str(exc)) from exc
+    for field in ("title", "body"):
+        value = payload.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise CursorNotifyInputError(
+                f"notification payload field {field!r} must be a non-empty string"
+            )
+    return payload
+
+
+def _encode_cursor_notification(payload: Mapping[str, Any]) -> bytes:
+    try:
+        raw = json.dumps(
+            payload,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise CursorNotifyInputError("notification payload is not valid JSON") from exc
+    if len(raw) > CURSOR_NOTIFY_MAX_PAYLOAD_BYTES:
+        raise CursorNotifyInputError(
+            f"encoded notification exceeds {CURSOR_NOTIFY_MAX_PAYLOAD_BYTES} bytes"
+        )
+    return raw + b"\n"
+
+
+def _validate_cursor_socket(path: pathlib.Path) -> os.stat_result:
+    try:
+        parent_metadata = path.parent.lstat()
+    except FileNotFoundError as exc:
+        raise CursorNotifyDeliveryError(
+            f"Cursor socket directory does not exist: {path.parent}"
+        ) from exc
+    except OSError as exc:
+        raise CursorNotifyDeliveryError(
+            f"cannot inspect Cursor socket directory: {clean_text(exc, 160)}"
+        ) from exc
+    if not stat.S_ISDIR(parent_metadata.st_mode):
+        raise CursorNotifyInputError("Cursor socket parent must be a real directory")
+    if parent_metadata.st_uid != os.getuid():
+        raise CursorNotifyInputError("Cursor socket directory must be owned by this user")
+    if stat.S_IMODE(parent_metadata.st_mode) & 0o077:
+        raise CursorNotifyInputError(
+            "Cursor socket directory must not be accessible by other users"
+        )
+
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError as exc:
+        raise CursorNotifyDeliveryError(
+            "Cursor notification socket is not running"
+        ) from exc
+    except OSError as exc:
+        raise CursorNotifyDeliveryError(
+            f"cannot inspect Cursor socket: {clean_text(exc, 160)}"
+        ) from exc
+    if not stat.S_ISSOCK(metadata.st_mode):
+        raise CursorNotifyInputError("Cursor endpoint must be a real Unix socket")
+    if metadata.st_uid != os.getuid():
+        raise CursorNotifyInputError("Cursor socket must be owned by this user")
+    if stat.S_IMODE(metadata.st_mode) != 0o600:
+        raise CursorNotifyInputError("Cursor socket must use mode 0600")
+    return metadata
+
+
+def _cursor_remaining_timeout(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise CursorNotifyDeliveryError("timed out waiting for the Cursor extension")
+    return remaining
+
+
+def _validate_cursor_peer(client: socket.socket) -> None:
+    peer_credential_option = getattr(socket, "SO_PEERCRED", None)
+    if peer_credential_option is None:
+        return
+    credential_size = struct.calcsize("3i")
+    credentials = client.getsockopt(
+        socket.SOL_SOCKET, peer_credential_option, credential_size
+    )
+    if len(credentials) != credential_size:
+        raise CursorNotifyDeliveryError("could not verify the Cursor extension peer")
+    _pid, peer_uid, _gid = struct.unpack("3i", credentials)
+    if peer_uid != os.getuid():
+        raise CursorNotifyInputError("Cursor extension peer belongs to another user")
+
+
+def _read_cursor_ack(client: socket.socket, deadline: float) -> dict[str, Any]:
+    line = bytearray()
+    while True:
+        client.settimeout(_cursor_remaining_timeout(deadline))
+        chunk = client.recv(min(4096, CURSOR_NOTIFY_MAX_ACK_BYTES + 1 - len(line)))
+        if not chunk:
+            raise CursorNotifyDeliveryError(
+                "Cursor extension closed without acknowledging the notification"
+            )
+        newline = chunk.find(b"\n")
+        if newline >= 0:
+            line.extend(chunk[:newline])
+            if len(line) > CURSOR_NOTIFY_MAX_ACK_BYTES:
+                raise CursorNotifyDeliveryError("Cursor acknowledgement is too large")
+            if chunk[newline + 1 :]:
+                raise CursorNotifyDeliveryError(
+                    "Cursor extension returned more than one acknowledgement"
+                )
+            break
+        line.extend(chunk)
+        if len(line) > CURSOR_NOTIFY_MAX_ACK_BYTES:
+            raise CursorNotifyDeliveryError("Cursor acknowledgement is too large")
+    try:
+        acknowledgement = _strict_json_object(bytes(line), "Cursor acknowledgement")
+    except ValueError as exc:
+        raise CursorNotifyDeliveryError(str(exc)) from exc
+    if acknowledgement.get("ok") is not True:
+        detail = clean_text(acknowledgement.get("error"), 200)
+        suffix = f": {detail}" if detail else ""
+        raise CursorNotifyDeliveryError(
+            f"Cursor extension rejected the notification{suffix}"
+        )
+    return acknowledgement
+
+
+def send_cursor_notification(
+    payload: Mapping[str, Any],
+    socket_path: pathlib.Path,
+    timeout: float = CURSOR_NOTIFY_DEFAULT_TIMEOUT,
+) -> dict[str, Any]:
+    """Send one NDJSON notification to a same-user Cursor extension endpoint."""
+    wire_payload = _encode_cursor_notification(payload)
+    initial_metadata = _validate_cursor_socket(socket_path)
+    deadline = time.monotonic() + timeout
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(_cursor_remaining_timeout(deadline))
+            client.connect(os.fspath(socket_path))
+            connected_metadata = _validate_cursor_socket(socket_path)
+            if (
+                connected_metadata.st_dev != initial_metadata.st_dev
+                or connected_metadata.st_ino != initial_metadata.st_ino
+            ):
+                raise CursorNotifyInputError(
+                    "Cursor socket changed while the connection was established"
+                )
+            _validate_cursor_peer(client)
+            client.settimeout(_cursor_remaining_timeout(deadline))
+            client.sendall(wire_payload)
+            return _read_cursor_ack(client, deadline)
+    except (CursorNotifyInputError, CursorNotifyDeliveryError):
+        raise
+    except (OSError, TimeoutError) as exc:
+        detail = clean_text(exc, 200) or exc.__class__.__name__
+        raise CursorNotifyDeliveryError(
+            f"could not deliver notification to Cursor: {detail}"
+        ) from exc
+
+
 def send_notifications(
     rows: Sequence[Mapping[str, Any]],
     config: Mapping[str, Any],
     skip_channels: set[str] | None = None,
+    state_dir: str | pathlib.Path = DEFAULT_STATE_DIR,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     title, body, payload = format_notification(rows, config)
     local_title, local_body, _local_payload = format_notification(
@@ -1933,6 +2319,27 @@ def send_notifications(
                 delivered["desktop"] = False
         else:
             delivered["desktop"] = "unavailable"
+
+    cursor = settings.get("cursor", {})
+    if (
+        "cursor" not in skip
+        and isinstance(cursor, Mapping)
+        and cursor.get("enabled", False)
+    ):
+        try:
+            configured_socket = str(cursor.get("socket") or "")
+            socket_path = cursor_notify_socket_path(
+                state_dir,
+                configured_socket or None,
+            )
+            send_cursor_notification(
+                format_cursor_notification(rows, config, title, payload),
+                socket_path,
+                min(timeout, CURSOR_NOTIFY_MAX_TIMEOUT),
+            )
+            delivered["cursor"] = True
+        except (CursorNotifyInputError, CursorNotifyDeliveryError) as exc:
+            delivered["cursor"] = (False, clean_text(exc, 200))
 
     command = settings.get("command", {})
     argv = command.get("argv", []) if isinstance(command, Mapping) else []
@@ -2044,6 +2451,9 @@ def channel_succeeded(value: Any) -> bool:
 def required_channels(config: Mapping[str, Any]) -> set[str]:
     settings = config["notifications"]
     remote: set[str] = set()
+    cursor = settings.get("cursor", {})
+    if isinstance(cursor, Mapping) and cursor.get("enabled", False):
+        remote.add("cursor")
     command = settings.get("command", {})
     if isinstance(command, Mapping) and command.get("argv"):
         remote.add("command")
@@ -2074,8 +2484,31 @@ def required_channels(config: Mapping[str, Any]) -> set[str]:
     return set()
 
 
+def wake_cursor_retries_for_new_listener(
+    db: StateDB,
+    config: Mapping[str, Any],
+) -> int:
+    """Wake delayed Cursor deliveries once for each newly bound socket inode."""
+    settings = config["notifications"].get("cursor", {})
+    if not isinstance(settings, Mapping) or not settings.get("enabled", False):
+        return 0
+    try:
+        configured_socket = str(settings.get("socket") or "")
+        path = cursor_notify_socket_path(db.state_dir, configured_socket or None)
+        metadata = _validate_cursor_socket(path)
+    except (CursorNotifyInputError, CursorNotifyDeliveryError):
+        return 0
+    key = os.fspath(path)
+    generation = (metadata.st_dev, metadata.st_ino)
+    if CURSOR_SOCKET_GENERATIONS.get(key) == generation:
+        return 0
+    CURSOR_SOCKET_GENERATIONS[key] = generation
+    return db.wake_failed_channel("cursor")
+
+
 def notify_due(db: StateDB, config: Mapping[str, Any]) -> int:
     db.enqueue_due(config)
+    wake_cursor_retries_for_new_listener(db, config)
     claimed = db.claim_outbox()
     if not claimed:
         return 0
@@ -2098,7 +2531,10 @@ def notify_due(db: StateDB, config: Mapping[str, Any]) -> int:
             json.loads(item["snapshot_json"]) for item in group_claimed
         ]
         payload, attempted = send_notifications(
-            rows, config, skip_channels=set(successful_channels)
+            rows,
+            config,
+            skip_channels=set(successful_channels),
+            state_dir=db.state_dir,
         )
         delivered: dict[str, Any] = dict(group[0][1])
         delivered.update(attempted)
@@ -2808,7 +3244,7 @@ def test_notification(args: argparse.Namespace, config: Mapping[str, Any]) -> in
         pid=os.getpid(),
         proc_start="test",
         pane_id=os.environ.get("TMUX_PANE", ""),
-        tmux_target="test:0.0",
+        tmux_target="",
         cwd=os.getcwd(),
         name="notification-test",
         state=args.kind,
@@ -2834,13 +3270,43 @@ def test_notification(args: argparse.Namespace, config: Mapping[str, Any]) -> in
         "raw_status": obs.raw_status,
         "message": obs.message,
     }
-    payload, delivered = send_notifications([row], config)
+    payload, delivered = send_notifications(
+        [row],
+        config,
+        state_dir=pathlib.Path(args.state_dir),
+    )
     db.record_notification("test", [row], payload, delivered)
     db.close()
     required = required_channels(config)
     success = bool(required) and all(channel_succeeded(delivered.get(name)) for name in required)
     print(f"Test notification {'succeeded' if success else 'failed'}: {delivered}")
     return 0
+
+
+def cursor_notify_command(args: argparse.Namespace) -> int:
+    """CLI adapter used by the custom-command notification channel."""
+    try:
+        timeout = float(args.timeout)
+        if (
+            isinstance(args.timeout, bool)
+            or not math.isfinite(timeout)
+            or timeout <= 0
+            or timeout > CURSOR_NOTIFY_MAX_TIMEOUT
+        ):
+            raise CursorNotifyInputError(
+                f"--timeout must be greater than 0 and at most {CURSOR_NOTIFY_MAX_TIMEOUT:g}"
+            )
+        requested_socket = getattr(args, "socket_path", None)
+        socket_path = cursor_notify_socket_path(args.state_dir, requested_socket)
+        payload = read_cursor_notification()
+        send_cursor_notification(payload, socket_path, timeout)
+        return 0
+    except CursorNotifyInputError as exc:
+        print(f"Cursor notification input error: {clean_text(exc, 300)}", file=sys.stderr)
+        return 2
+    except CursorNotifyDeliveryError as exc:
+        print(f"Cursor notification failed: {clean_text(exc, 300)}", file=sys.stderr)
+        return 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2878,6 +3344,25 @@ def build_parser() -> argparse.ArgumentParser:
     test.add_argument("--kind", choices=tuple(ATTENTION_STATES), default="needs_input")
     test.add_argument("--provider", choices=("codex", "claude"), default="codex")
 
+    cursor_notify = sub.add_parser(
+        "cursor-notify",
+        help="forward one JSON notification from stdin to the Cursor extension",
+    )
+    cursor_notify.add_argument(
+        "--socket",
+        dest="socket_path",
+        help=(
+            "absolute extension socket path (default: "
+            "AGENT_WATCH_CURSOR_SOCKET or STATE_DIR/cursor-notify.sock)"
+        ),
+    )
+    cursor_notify.add_argument(
+        "--timeout",
+        type=float,
+        default=CURSOR_NOTIFY_DEFAULT_TIMEOUT,
+        help=f"delivery timeout in seconds (default: {CURSOR_NOTIFY_DEFAULT_TIMEOUT:g})",
+    )
+
     sub.add_parser("install-hooks", help="merge native hooks into Codex and Claude settings")
     sub.add_parser("uninstall-hooks", help="remove only agent-watch hooks")
     clear = sub.add_parser("clear-history", help="delete locally retained session history")
@@ -2899,6 +3384,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         except (OSError, ValueError, tomllib.TOMLDecodeError):
             hook_config = deep_merge(DEFAULT_CONFIG, {})
         return run_hook(args, hook_config)
+    if args.command == "cursor-notify":
+        # This command is itself a configured notification sink. It must remain
+        # usable while the main config is absent or being repaired.
+        return cursor_notify_command(args)
     try:
         config = load_config(pathlib.Path(args.config))
     except (OSError, ValueError, tomllib.TOMLDecodeError) as exc:
