@@ -1305,6 +1305,9 @@ def render_detail(view: DashboardView, width: int, height: int) -> RenderableTyp
         action = Text()
         action.append("Enter", style=f"bold {ORANGE}")
         action.append(" to open this tmux session", style=MUTED)
+        action.append("  ·  ", style=FAINT)
+        action.append("tmux prefix + L", style=f"bold {ORANGE}")
+        action.append(" to return", style=MUTED)
         lines.append(action)
 
     return Panel(
@@ -1325,6 +1328,7 @@ def render_help(width: int) -> RenderableType:
         ("↑ / k", "Previous session"),
         ("↓ / j", "Next session"),
         ("Enter", "Open selected tmux session"),
+        ("tmux prefix + L", "Return to Agent Watch after opening a session"),
         ("/", "Search projects, paths, or sessions"),
         ("f", "Cycle All / Attention / Running"),
         ("p", "Show / hide local session preview"),
@@ -1397,7 +1401,9 @@ def render_footer(view: DashboardView, width: int, minimal: bool = False) -> Ren
     else:
         items = [("↑↓", "select"), ("enter", "open"), ("/", "search"), ("f", "filter")]
     if width >= 120:
-        items.extend([("p", "preview"), ("r", "refresh"), ("?", "help")])
+        items.extend(
+            [("prefix+L", "back"), ("p", "preview"), ("r", "refresh"), ("?", "help")]
+        )
     if not any(key == "q" for key, _label in items):
         items.append(("q", "quit"))
     for index, (key, label) in enumerate(items):
@@ -1650,6 +1656,23 @@ def switch_to_session(row: Mapping[str, Any]) -> tuple[bool, str]:
                 timeout=3,
                 check=False,
             )
+            if run.returncode == 0:
+                with contextlib.suppress(OSError, subprocess.SubprocessError):
+                    subprocess.run(
+                        source_base
+                        + [
+                            "display-message",
+                            "-c",
+                            candidates[0],
+                            "-d",
+                            "5000",
+                            "Agent Watch: press tmux prefix + L to return",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=2,
+                        check=False,
+                    )
         else:
             run = subprocess.run(base + ["attach-session", "-t", locator], check=False)
         if run.returncode == 0:

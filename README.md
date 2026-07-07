@@ -202,11 +202,11 @@ agent-watch clear-history --yes       # stop the daemon first
 Dashboard keys:
 
 ```text
-Up/Down or j/k   select a session      Enter   enter the selected tmux pane
-/                search                f       cycle filters
-g/G              first/last session    p       show/hide conversation preview
-r                refresh               ?       help
-q                close the UI; the daemon keeps running
+Up/Down or j/k   select a session      Enter             enter selected tmux pane
+tmux prefix + L  return to Agent Watch /                 search
+f                cycle filters         g/G               first/last session
+p                show/hide preview     r                 refresh
+?                help                  q                 close only the UI
 ```
 
 Sessions needing input, failed sessions, completed turns, exited processes,

@@ -179,11 +179,11 @@ agent-watch clear-history --yes       # 需要先停止 daemon
 仪表盘快捷键：
 
 ```text
-↑/↓ 或 j/k   选择会话        Enter   进入所选 tmux pane
-/             搜索            f       切换筛选
-g/G           第一项/最后一项 p       显示/隐藏对话预览
-r             刷新            ?       帮助
-q             只关闭 UI；daemon 继续运行
+↑/↓ 或 j/k      选择会话        Enter       进入所选 tmux pane
+tmux 前缀键 + L  返回 Agent Watch /           搜索
+f                切换筛选        g/G         第一项/最后一项
+p                显示/隐藏预览   r           刷新
+?                帮助            q           只关闭 UI
 ```
 
 需要输入、运行失败、一轮结束、进程退出、运行中和自动等待会被区分显示。运行中的会话

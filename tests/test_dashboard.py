@@ -225,6 +225,20 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("Last action", rendered)
         self.assertNotIn("Current action", rendered)
         self.assertIn("Enter to open this tmux session", rendered)
+        self.assertIn("tmux prefix + L", rendered)
+        self.assertIn("to return", rendered)
+
+    @unittest.skipUnless(ui.RICH_AVAILABLE, "rich unavailable")
+    def test_help_explains_how_to_return_from_tmux_session(self):
+        from rich.console import Console
+
+        output = io.StringIO()
+        console = Console(
+            file=output, width=90, force_terminal=False, color_system=None
+        )
+        console.print(ui.render_help(90))
+        self.assertIn("tmux prefix + L", output.getvalue())
+        self.assertIn("Return to Agent Watch", output.getvalue())
 
     def test_sanitize_removes_terminal_controls(self):
         value = ui.sanitize("safe\x1b[31m red\x1b[0m\x1b]0;title\x07\u202erev\x7f")
@@ -260,6 +274,7 @@ class DashboardTests(unittest.TestCase):
             completed([], 0, stdout="1:0.0\n", stderr=""),
             completed([], 0, stdout="/dev/pts/7|%dash\n", stderr=""),
             completed([], 0, stdout="", stderr=""),
+            completed([], 0, stdout="", stderr=""),
         ]
         with mock.patch.dict(
             ui.os.environ,
@@ -269,7 +284,7 @@ class DashboardTests(unittest.TestCase):
             ok, message = ui.switch_to_session(row)
         self.assertTrue(ok, message)
         self.assertEqual(
-            run.call_args_list[-1].args[0],
+            run.call_args_list[-2].args[0],
             [
                 "tmux",
                 "-S",
@@ -279,6 +294,20 @@ class DashboardTests(unittest.TestCase):
                 "/dev/pts/7",
                 "-t",
                 "%1",
+            ],
+        )
+        self.assertEqual(
+            run.call_args_list[-1].args[0],
+            [
+                "tmux",
+                "-S",
+                "/tmp/tmux-0/default",
+                "display-message",
+                "-c",
+                "/dev/pts/7",
+                "-d",
+                "5000",
+                "Agent Watch: press tmux prefix + L to return",
             ],
         )
 
