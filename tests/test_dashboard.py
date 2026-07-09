@@ -67,6 +67,23 @@ def write_resume_artifact(home, row):
 
 
 class DashboardTests(unittest.TestCase):
+    def test_rich_environment_repairs_dumb_term_from_terminal_emulator(self):
+        environ = ui.rich_console_environment(
+            {"TERM": "dumb", "TERM_PROGRAM": "vscode", "NO_COLOR": "1"}
+        )
+        self.assertEqual(environ["TERM"], "xterm-256color")
+        self.assertEqual(environ["NO_COLOR"], "1")
+
+    def test_rich_environment_preserves_real_dumb_terminal(self):
+        environ = ui.rich_console_environment({"TERM": "dumb"})
+        self.assertEqual(environ["TERM"], "dumb")
+
+    def test_rich_environment_preserves_existing_terminal_type(self):
+        environ = ui.rich_console_environment(
+            {"TERM": "screen-256color", "TERM_PROGRAM": "vscode"}
+        )
+        self.assertEqual(environ["TERM"], "screen-256color")
+
     def test_readme_screenshot_is_reproducible_synthetic_data(self):
         committed = ROOT / "docs" / "agent-watch-demo.svg"
         with tempfile.TemporaryDirectory() as tmp:

@@ -86,6 +86,25 @@ ANSI_RE = re.compile(
 )
 
 
+def rich_console_environment(environ: Mapping[str, str]) -> dict[str, str]:
+    """Return a Rich environment that reflects an interactive terminal emulator.
+
+    Cursor and VS Code tasks may provide a real PTY while inheriting
+    ``TERM=dumb`` from their parent process. Rich then deliberately suppresses
+    every live refresh, leaving the dashboard apparently blank until it exits.
+    ``TERM_PROGRAM`` and ``WT_SESSION`` identify terminal emulators that support
+    the full-screen control sequences used here. Keep an explicit dumb terminal
+    untouched when neither signal is present.
+    """
+    result = dict(environ)
+    term = result.get("TERM", "").lower()
+    emulator_present = bool(result.get("TERM_PROGRAM") or result.get("WT_SESSION"))
+    explicitly_compatible = result.get("TTY_COMPATIBLE") == "1"
+    if term in {"", "dumb", "unknown"} and (emulator_present or explicitly_compatible):
+        result["TERM"] = "xterm-256color"
+    return result
+
+
 @dataclasses.dataclass(slots=True)
 class DashboardSnapshot:
     sessions: list[dict[str, Any]] = dataclasses.field(default_factory=list)
@@ -2081,7 +2100,11 @@ def run_dashboard(
         print("agent-watch ui requires an interactive TTY", file=sys.stderr)
         return 2
 
-    console = Console(highlight=False, soft_wrap=False)
+    console = Console(
+        highlight=False,
+        soft_wrap=False,
+        _environ=rich_console_environment(os.environ),
+    )
     snapshot = load_snapshot(
         state_dir,
         heartbeat_max_age=heartbeat_max_age,
