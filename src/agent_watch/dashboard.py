@@ -30,6 +30,7 @@ import unicodedata
 from typing import Any, Mapping, Sequence
 
 from . import __version__
+from .processes import open_process_files
 from .resume import resume_availability, resume_in_new_tmux
 
 try:
@@ -546,11 +547,7 @@ class ConversationPreviewLoader:
     ) -> pathlib.Path | None:
         pid = int(row.get("pid") or 0)
         if pid > 0:
-            for fd in pathlib.Path(f"/proc/{pid}/fd").glob("*"):
-                try:
-                    target = pathlib.Path(os.readlink(fd))
-                except OSError:
-                    continue
+            for target in open_process_files(pid):
                 if "rollout-" not in target.name or target.suffix != ".jsonl":
                     continue
                 safe = self._safe_file(target, self.codex_root)

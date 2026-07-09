@@ -687,8 +687,9 @@ class DashboardTests(unittest.TestCase):
                     str(cwd),
                     shlex.join(
                         [
-                            "/usr/bin/flock",
-                            "-n",
+                            resume.sys.executable,
+                            "-m",
+                            "agent_watch.resume",
                             str(
                                 lock_file
                             ),
@@ -721,6 +722,29 @@ class DashboardTests(unittest.TestCase):
                 ],
             )
             self.assertIn("prefix + L", run.call_args_list[-1].args[0][-1])
+
+    def test_resume_lock_wrapper_holds_lock_across_exec(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lock_path = pathlib.Path(tmp) / "resume.lock"
+            lock_path.write_text("")
+            lock_path.chmod(0o600)
+            observed = {}
+
+            def fake_exec(executable, command):
+                observed["executable"] = executable
+                observed["command"] = command
+                observed["busy"] = resume._resume_lock_busy(lock_path)
+                raise OSError("stop before replacing the test process")
+
+            with mock.patch.object(resume.os, "execv", side_effect=fake_exec):
+                with self.assertRaises(OSError):
+                    resume.exec_with_lock(
+                        lock_path,
+                        [resume.sys.executable, "-c", "raise SystemExit(0)"],
+                    )
+            self.assertTrue(observed["busy"])
+            self.assertEqual(observed["executable"], resume.sys.executable)
+            self.assertEqual(observed["command"][1:3], ["-c", "raise SystemExit(0)"])
 
     def test_resume_reuses_existing_named_tmux_session(self):
         with tempfile.TemporaryDirectory() as tmp:

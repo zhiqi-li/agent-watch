@@ -23,6 +23,7 @@ import shlex
 import shutil
 import stat
 import subprocess
+import sys
 import time
 from collections.abc import Mapping
 from typing import Any
@@ -207,9 +208,9 @@ def resume_availability(
 
     Availability requires a supported provider, a stable command-safe session
     ID, an owned conversation artifact, an existing directory in ``cwd``, and
-    tmux, flock, and the provider CLI in ``PATH``. The returned reason is empty
-    on success and suitable for display to the user on failure. This function
-    does not run any commands.
+    tmux and the provider CLI in ``PATH``. The returned reason is empty on
+    success and suitable for display to the user on failure. This function does
+    not run any commands.
     """
 
     state = _clean_text(_row_value(row, "state"), maximum=32)
@@ -225,8 +226,6 @@ def resume_availability(
         return False, "Conversation data is no longer available"
     if _absolute_executable("tmux") is None:
         return False, "tmux is not available in PATH"
-    if _absolute_executable("flock") is None:
-        return False, "flock is not available in PATH"
     if _absolute_executable(provider) is None:
         label = "Codex" if provider == "codex" else "Claude"
         return False, f"{label} CLI is not available in PATH"
@@ -354,7 +353,7 @@ def _resume_lock_path(
                 if configured
                 else pathlib.Path.home() / ".local" / "state" / "agent-watch"
             )
-        lock_dir = pathlib.Path(state_dir) / "resume-locks"
+        lock_dir = pathlib.Path(state_dir).expanduser().absolute() / "resume-locks"
         lock_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         lock_dir.chmod(0o700)
         name = resume_tmux_name(row).removeprefix(f"{_TMUX_NAME_PREFIX}-")
@@ -384,6 +383,64 @@ def _resume_lock_busy(path: pathlib.Path) -> bool:
         return False
     finally:
         os.close(fd)
+
+
+def exec_with_lock(lock_path: pathlib.Path, command: list[str]) -> int:
+    """Hold a private flock across ``exec`` and run *command*.
+
+    This replaces the Linux-only ``flock(1)`` utility while retaining the same
+    cross-dashboard exclusion on Linux and macOS. The descriptor must be marked
+    inheritable because Python makes newly opened descriptors close-on-exec by
+    default.
+    """
+
+    if not command or not os.path.isabs(command[0]):
+        raise ValueError("the locked command must use an absolute executable path")
+    executable = pathlib.Path(command[0])
+    try:
+        executable_info = executable.stat()
+    except OSError as exc:
+        raise ValueError("the locked command executable is unavailable") from exc
+    if not stat.S_ISREG(executable_info.st_mode) or not os.access(
+        executable, os.X_OK
+    ):
+        raise ValueError("the locked command executable is not executable")
+
+    flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(lock_path, flags)
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError("the resume lock is not a regular file")
+        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077:
+            raise ValueError("the resume lock must be private and owned by this user")
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return 75
+        os.set_inheritable(descriptor, True)
+        os.execv(command[0], command)
+        return 70  # pragma: no cover - os.execv does not return on success
+    finally:
+        os.close(descriptor)
+
+
+def _locked_command_main(argv: list[str] | None = None) -> int:
+    values = list(sys.argv[1:] if argv is None else argv)
+    if len(values) < 2:
+        print(
+            "usage: python -m agent_watch.resume LOCK_PATH COMMAND [ARG ...]",
+            file=sys.stderr,
+        )
+        return 64
+    try:
+        return exec_with_lock(pathlib.Path(values[0]), values[1:])
+    except (OSError, ValueError) as exc:
+        print(
+            _diagnostic(str(exc), "Unable to start the locked resume command"),
+            file=sys.stderr,
+        )
+        return 70
 
 
 def _resume_session_status(
@@ -418,7 +475,9 @@ def _resume_session_status(
             continue
         if command in {provider, "flock"}:
             return "live", ""
-        if command in {"sh", "bash", "dash"}:
+        if command in {"sh", "bash", "dash"} or command.casefold().startswith(
+            "python"
+        ):
             return "starting", ""
     if saw_dead:
         return "dead", "The previous resume process has exited"
@@ -484,11 +543,11 @@ def resume_in_new_tmux(
     attached directly.
 
     A live session with the deterministic name is reused, while dead panes are
-    removed. A per-session ``flock`` held by the provider process prevents two
-    dashboards on different tmux servers from launching the same conversation.
-    Otherwise tmux receives the saved cwd and a shell-command produced only with
-    :func:`shlex.join`. Historical ``tmux_socket``, ``tmux_target``, and
-    ``pane_id`` row fields are never read.
+    removed. A per-session advisory lock held by the provider process prevents
+    two dashboards on different tmux servers from launching the same
+    conversation. Otherwise tmux receives the saved cwd and a shell-command
+    produced only with :func:`shlex.join`. Historical ``tmux_socket``,
+    ``tmux_target``, and ``pane_id`` row fields are never read.
     """
 
     available, reason = resume_availability(row, home=home)
@@ -512,16 +571,14 @@ def resume_in_new_tmux(
         if executable is None:
             return False, f"{command[0]} is no longer available in PATH"
         command[0] = executable
-        flock_executable = _absolute_executable("flock")
-        if flock_executable is None:
-            return False, "flock is no longer available in PATH"
         lock_path, error = _resume_lock_path(row, state_dir)
         if lock_path is None:
             return False, error
         lock_busy = _resume_lock_busy(lock_path)
         locked_command = [
-            flock_executable,
-            "-n",
+            sys.executable,
+            "-m",
+            "agent_watch.resume",
             str(lock_path),
             *command,
         ]
@@ -577,8 +634,9 @@ def resume_in_new_tmux(
                     )
 
             # Catch missing artifacts, lock contention, and other provider
-            # failures before claiming that resume succeeded. A shell may be
-            # visible for a few milliseconds before it execs flock.
+            # failures before claiming that resume succeeded. A shell or the
+            # small Python lock wrapper may be visible before it execs the
+            # provider.
             for attempt in range(4):
                 session_status, status_reason = _resume_session_status(
                     base, target, provider
@@ -629,3 +687,7 @@ def resume_in_new_tmux(
         )
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
         return False, _diagnostic(str(exc), "Unable to resume this session")
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised through subprocess tests
+    raise SystemExit(_locked_command_main())

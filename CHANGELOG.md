@@ -9,6 +9,10 @@ experimental.
 
 ### Added
 
+- macOS support for same-user Codex and Claude process discovery, rollout file
+  resolution, tmux location mapping, native Notification Center delivery, and
+  session resumption without the Linux-only `flock(1)` command.
+- macOS CI coverage alongside the existing Linux and Python-version matrix.
 - A companion Cursor/VS Code workspace extension and first-class `cursor`
   notification channel. A private same-user Unix socket carries bounded,
   editor-specific payloads from local or Remote SSH Agent Watch daemons to native

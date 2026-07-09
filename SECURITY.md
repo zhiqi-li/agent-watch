@@ -22,7 +22,7 @@ transcripts. Use a private GitHub security advisory:
 Include:
 
 - the Agent Watch version or commit;
-- Linux, Python, tmux, Codex CLI, and Claude Code versions;
+- operating system, Python, tmux, Codex CLI, and Claude Code versions;
 - an impact description and minimal reproduction using synthetic data;
 - whether the issue requires the same Unix user, a malicious project, or a
   configured remote notification endpoint.
@@ -34,12 +34,13 @@ bounty or guaranteed response SLA.
 
 ## Security model
 
-Agent Watch is intended for a single Unix user on a trusted Linux host. Run it as
-that user, never as root merely to discover more sessions. It is not a privilege
-boundary, sandbox, multi-tenant service, or protection against a process already
-running as the same user.
+Agent Watch is intended for a single Unix user on a trusted Linux or macOS host.
+Run it as that user, never as root merely to discover more sessions. It is not a
+privilege boundary, sandbox, multi-tenant service, or protection against a
+process already running as the same user.
 
-The daemon reads `/proc`, tmux metadata and pane text, Codex rollouts, Claude
+The daemon reads same-user process metadata through Linux `/proc` or macOS
+process APIs, tmux metadata and pane text, Codex rollouts, Claude
 session/transcript files, and hook payloads. It writes local state under
 `~/.local/state/agent-watch/` and changes Codex/Claude hook configuration only
 when `install-hooks` or `uninstall-hooks` is explicitly run.

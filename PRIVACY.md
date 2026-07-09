@@ -9,7 +9,8 @@ metadata and can send notifications to services you configure.
 Depending on enabled features, Agent Watch reads:
 
 - current-user process IDs, executable names, start times, cwd, TTY, environment
-  fields used for tmux location, and open rollout file descriptors from `/proc`;
+  fields used for tmux location, and open rollout file descriptors from Linux
+  `/proc` or the macOS process APIs exposed by psutil;
 - tmux session/window/pane metadata and a bounded tail of pane text;
 - Codex rollout JSONL and Claude session/transcript files under the current
   user's home directory;

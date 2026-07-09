@@ -13,8 +13,8 @@
 [Changelog](CHANGELOG.md)
 
 Agent Watch monitors Codex CLI and Claude Code sessions owned by the current
-Linux user. It presents a terminal dashboard and can notify you when a turn
-finishes, an agent needs input, a run fails, or a process disappears.
+Linux or macOS user. It presents a terminal dashboard and can notify you when a
+turn finishes, an agent needs input, a run fails, or a process disappears.
 
 ![Agent Watch terminal dashboard with synthetic demo data](docs/agent-watch-demo.svg)
 
@@ -49,8 +49,8 @@ larger task succeeded.
 
 ## Requirements
 
-- Linux with `/proc`; only processes visible to the current Unix user are
-  monitored.
+- Linux with `/proc`, or macOS. Only processes visible to the current Unix user
+  are monitored.
 - Python 3.11 or newer.
 - tmux is strongly recommended. Session location, exact-pane navigation, and
   tmux notifications require it.
@@ -63,6 +63,13 @@ Install the latest release from GitHub with pipx:
 ```bash
 pipx install "git+https://github.com/zhiqi-li/agent-watch.git@v0.2.1"
 agent-watch --version
+```
+
+macOS support is currently available from `main` and will be included in the
+next tagged release:
+
+```bash
+pipx install "git+https://github.com/zhiqi-li/agent-watch.git@main"
 ```
 
 Upgrade or uninstall the package with:
@@ -195,7 +202,7 @@ cursor --uninstall-extension agent-watch.agent-watch-cursor-notifications
 Choose one daemon method. Do not run the systemd and tmux daemon methods at the
 same time; a process lock prevents duplicate instances.
 
-### systemd user service (recommended)
+### systemd user service (recommended on Linux)
 
 Install the hardened user unit from
 [systemd/agent-watch.service](systemd/agent-watch.service):
@@ -220,7 +227,7 @@ Some distributions disable the unprivileged namespaces used by systemd
 sandboxing. If the unit fails while setting up its namespace, review the
 hardening directives with your administrator or use the tmux method below.
 
-### tmux (for hosts without systemd)
+### tmux (macOS or hosts without systemd)
 
 ```bash
 tmux new-session -d -s agent-watch -n daemon \
@@ -318,6 +325,7 @@ Current tested matrix:
 
 | Component | Tested version | Notes |
 |---|---:|---|
+| Operating system | Ubuntu, macOS 26 | Linux `/proc` and Apple Silicon |
 | Python | 3.12.3 | Supported target is 3.11+ |
 | Rich | 14 | TUI rendering |
 | tmux | 3.4 | Default and custom sockets |
@@ -334,9 +342,9 @@ conversation text, tokens, configuration, databases, or transcripts.
 - **No sessions are discovered:** confirm that the daemon and agents belong to
   the same Unix user. Run `agent-watch daemon --once --no-notify-existing` and
   `agent-watch status --json`.
-- **The dashboard reports that the daemon stopped:** inspect
-  `systemctl --user status agent-watch`,
-  `journalctl --user -u agent-watch`, or
+- **The dashboard reports that the daemon stopped:** on Linux inspect
+  `systemctl --user status agent-watch` or `journalctl --user -u agent-watch`;
+  for the tmux method on either platform, run
   `tmux capture-pane -p -t agent-watch:daemon`.
 - **Hooks do not fire:** rerun `agent-watch install-hooks`; run `/hooks` in
   Codex; inspect `~/.local/state/agent-watch/hook-errors.log`.
@@ -357,7 +365,7 @@ conversation text, tokens, configuration, databases, or transcripts.
 
 ## Project status
 
-Agent Watch is an experimental, single-user Linux utility, not a hosted
+Agent Watch is an experimental, single-user Linux and macOS utility, not a hosted
 monitoring service. Security fixes are provided on a best-effort basis for the
 latest `0.x` release and `main`. Report vulnerabilities privately according to
 [SECURITY.md](SECURITY.md); report ordinary bugs at
