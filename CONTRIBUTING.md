@@ -8,8 +8,8 @@ more important than adding broad heuristics quickly.
 
 - Search existing issues at
   <https://github.com/zhiqi-li/agent-watch/issues>.
-- Include Linux, Python, Rich, tmux, Codex CLI, Claude Code, and Agent Watch
-  versions.
+- Include the operating system, Python, Rich, tmux, Codex CLI, Claude Code, and
+  Agent Watch versions.
 - Include the exact command and expected/actual state transition.
 - Use synthetic fixtures. Never attach a real rollout, transcript, hook payload,
   database, configuration with credentials, or unredacted `status --json` output.
@@ -17,8 +17,8 @@ more important than adding broad heuristics quickly.
 
 ## Development setup
 
-Requirements are Linux with `/proc`, Python 3.11+, and tmux. Create an isolated
-environment from a clone:
+Requirements are Linux with `/proc` or macOS, Python 3.11+, and tmux. Create an
+isolated environment from a clone:
 
 ```bash
 git clone https://github.com/zhiqi-li/agent-watch.git

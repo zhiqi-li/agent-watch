@@ -7,8 +7,6 @@ The monitor deliberately uses explicit local lifecycle state whenever possible:
 * Codex: the main rollout JSONL opened by each Codex process
 * Native hooks: permission/input/completion events for newly started sessions
 * tmux capture: a narrow fallback for interactive prompts not covered above
-
-Only Python's standard library is required.
 """
 
 from __future__ import annotations
@@ -44,6 +42,12 @@ import uuid
 from typing import Any, Iterable, Mapping, Sequence
 
 from . import __version__
+from .processes import (
+    ProcessInfo,
+    exact_agent_processes,
+    open_process_files,
+    process_details,
+)
 
 APP_NAME = "agent-watch"
 VERSION = __version__
@@ -343,18 +347,6 @@ class Pane:
     @property
     def target(self) -> str:
         return f"{self.session}:{self.window}.{self.index}"
-
-
-@dataclasses.dataclass(slots=True)
-class ProcessInfo:
-    pid: int
-    provider: str
-    start_time: str
-    state: str
-    cwd: str
-    tty: str
-    tmux_socket: str = ""
-    tmux_pane: str = ""
 
 
 @dataclasses.dataclass(slots=True)
@@ -1039,86 +1031,6 @@ class StateDB:
         ).fetchall()
 
 
-def proc_stat(pid: int) -> tuple[str, str] | None:
-    try:
-        text = pathlib.Path(f"/proc/{pid}/stat").read_text()
-    except (OSError, UnicodeError):
-        return None
-    end = text.rfind(")")
-    if end < 0:
-        return None
-    fields = text[end + 2 :].split()
-    if len(fields) < 20:
-        return None
-    return fields[0], fields[19]  # process state, kernel starttime ticks
-
-
-def proc_tty(pid: int) -> str:
-    for fd in (0, 1, 2):
-        with contextlib.suppress(OSError):
-            target = os.readlink(f"/proc/{pid}/fd/{fd}")
-            if target.startswith("/dev/pts/") or target.startswith("/dev/tty"):
-                return target
-    return ""
-
-
-def proc_tmux_location(pid: int) -> tuple[str, str]:
-    try:
-        data = pathlib.Path(f"/proc/{pid}/environ").read_bytes()
-    except OSError:
-        return "", ""
-    values: dict[str, str] = {}
-    for item in data.split(b"\0"):
-        if b"=" not in item:
-            continue
-        key, value = item.split(b"=", 1)
-        if key in {b"TMUX", b"TMUX_PANE"}:
-            values[key.decode()] = value.decode("utf-8", "replace")
-    tmux_value = values.get("TMUX", "")
-    socket_path = tmux_value.rsplit(",", 2)[0] if tmux_value.count(",") >= 2 else ""
-    pane_id = clean_text(values.get("TMUX_PANE", ""), 40)
-    return socket_path, pane_id
-
-
-def exact_agent_processes() -> list[ProcessInfo]:
-    result: list[ProcessInfo] = []
-    uid = os.getuid()
-    for entry in pathlib.Path("/proc").iterdir():
-        if not entry.name.isdigit():
-            continue
-        pid = int(entry.name)
-        try:
-            if entry.stat().st_uid != uid:
-                continue
-            comm = (entry / "comm").read_text().strip()
-        except (OSError, UnicodeError):
-            continue
-        if comm not in {"codex", "claude"}:
-            continue
-        details = proc_stat(pid)
-        if details is None or details[0] == "Z":
-            continue
-        state, start_time = details
-        try:
-            cwd = os.readlink(entry / "cwd")
-        except OSError:
-            cwd = ""
-        tmux_socket, tmux_pane = proc_tmux_location(pid)
-        result.append(
-            ProcessInfo(
-                pid=pid,
-                provider=comm,
-                start_time=start_time,
-                state=state,
-                cwd=cwd,
-                tty=proc_tty(pid),
-                tmux_socket=tmux_socket,
-                tmux_pane=tmux_pane,
-            )
-        )
-    return result
-
-
 def tmux_socket_paths(extra: Iterable[str] = ()) -> list[str]:
     base = pathlib.Path(f"/tmp/tmux-{os.getuid()}")
     sockets: set[str] = set()
@@ -1325,14 +1237,11 @@ def find_main_codex_rollout(pid: int, proc_start: str = "") -> tuple[pathlib.Pat
     cached = CODEX_ROLLOUT_CACHE.get(cache_key)
     if cached and cached[0].exists():
         return cached
-    paths: set[pathlib.Path] = set()
-    for fd in glob.glob(f"/proc/{pid}/fd/*"):
-        try:
-            target = os.readlink(fd)
-        except OSError:
-            continue
-        if "rollout-" in target and target.endswith(".jsonl"):
-            paths.add(pathlib.Path(target))
+    paths = {
+        path
+        for path in open_process_files(pid)
+        if "rollout-" in path.name and path.suffix == ".jsonl"
+    }
     candidates: list[tuple[pathlib.Path, str]] = []
     for path in paths:
         first = read_json_first_line(path)
@@ -1517,7 +1426,7 @@ def load_claude_session(pid: int) -> Mapping[str, Any] | None:
         return None
     if value.get("pid") is not None and str(value.get("pid")) != str(pid):
         return None
-    details = proc_stat(pid)
+    details = process_details(pid)
     if details and value.get("procStart") is not None:
         if str(value.get("procStart")) != details[1]:
             return None
@@ -2255,6 +2164,39 @@ def send_cursor_notification(
         ) from exc
 
 
+def send_desktop_notification(title: str, body: str, timeout: float) -> bool | str:
+    """Deliver a native desktop notification on Linux or macOS."""
+
+    if sys.platform == "darwin":
+        executable = shutil.which("osascript")
+        if not executable:
+            return "unavailable"
+        script = (
+            "on run argv\n"
+            "display notification (item 2 of argv) with title (item 1 of argv)\n"
+            "end run"
+        )
+        command = [executable, "-e", script, "--", title, body]
+    else:
+        executable = shutil.which("notify-send")
+        if not executable or not (
+            os.environ.get("DISPLAY") or os.environ.get("DBUS_SESSION_BUS_ADDRESS")
+        ):
+            return "unavailable"
+        command = [executable, title, body]
+    try:
+        run = subprocess.run(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout,
+            check=False,
+        )
+        return run.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def send_notifications(
     rows: Sequence[Mapping[str, Any]],
     config: Mapping[str, Any],
@@ -2305,20 +2247,9 @@ def send_notifications(
         delivered["tmux"] = success
 
     if settings.get("desktop", False) and "desktop" not in skip:
-        if shutil.which("notify-send") and (os.environ.get("DISPLAY") or os.environ.get("DBUS_SESSION_BUS_ADDRESS")):
-            try:
-                run = subprocess.run(
-                    ["notify-send", local_title, local_body],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=timeout,
-                    check=False,
-                )
-                delivered["desktop"] = run.returncode == 0
-            except (OSError, subprocess.SubprocessError):
-                delivered["desktop"] = False
-        else:
-            delivered["desktop"] = "unavailable"
+        delivered["desktop"] = send_desktop_notification(
+            local_title, local_body, timeout
+        )
 
     cursor = settings.get("cursor", {})
     if (

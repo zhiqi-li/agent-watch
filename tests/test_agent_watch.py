@@ -3,6 +3,7 @@ import http.server
 import io
 import json
 import pathlib
+import subprocess
 import sys
 import tempfile
 import threading
@@ -57,6 +58,70 @@ class AgentWatchTests(unittest.TestCase):
         self.assertIn("daemon: stopped", rendered)
         self.assertIn("No monitored sessions yet.", rendered)
         self.assertFalse(any("\u4e00" <= character <= "\u9fff" for character in rendered))
+
+    def test_codex_rollout_discovery_uses_platform_open_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rollout = pathlib.Path(tmp) / "rollout-test.jsonl"
+            rollout.write_text(
+                json.dumps(
+                    {
+                        "type": "session_meta",
+                        "payload": {"source": "cli", "id": "mac-session"},
+                    }
+                )
+                + "\n"
+            )
+            aw.CODEX_ROLLOUT_CACHE.clear()
+            with mock.patch.object(aw, "open_process_files", return_value=[rollout]):
+                found = aw.find_main_codex_rollout(123, "start")
+            self.assertEqual(found, (rollout, "mac-session"))
+
+    def test_claude_session_accepts_platform_start_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = pathlib.Path(tmp)
+            session_dir = home / ".claude" / "sessions"
+            session_dir.mkdir(parents=True)
+            payload = {
+                "pid": 123,
+                "procStart": "Wed Jul  8 10:56:27 2026",
+                "sessionId": "claude-session",
+            }
+            (session_dir / "123.json").write_text(json.dumps(payload))
+            with (
+                mock.patch.object(aw, "HOME", home),
+                mock.patch.object(
+                    aw,
+                    "process_details",
+                    return_value=("running", "Wed Jul  8 10:56:27 2026"),
+                ),
+            ):
+                self.assertEqual(aw.load_claude_session(123), payload)
+            with (
+                mock.patch.object(aw, "HOME", home),
+                mock.patch.object(
+                    aw,
+                    "process_details",
+                    return_value=("running", "Wed Jul  8 10:57:00 2026"),
+                ),
+            ):
+                self.assertIsNone(aw.load_claude_session(123))
+
+    def test_macos_desktop_notification_uses_argv_not_script_interpolation(self):
+        completed = subprocess.CompletedProcess([], 0)
+        with (
+            mock.patch.object(aw.sys, "platform", "darwin"),
+            mock.patch.object(aw.shutil, "which", return_value="/usr/bin/osascript"),
+            mock.patch.object(aw.subprocess, "run", return_value=completed) as run,
+        ):
+            result = aw.send_desktop_notification(
+                'Agent "Watch"', 'body with "quotes"', 3.0
+            )
+        self.assertTrue(result)
+        command = run.call_args.args[0]
+        self.assertEqual(command[0], "/usr/bin/osascript")
+        self.assertEqual(command[-2:], ['Agent "Watch"', 'body with "quotes"'])
+        self.assertNotIn('Agent "Watch"', command[2])
+        self.assertNotIn('body with "quotes"', command[2])
 
     def test_replayed_attention_hook_is_deduplicated(self):
         payload = {
