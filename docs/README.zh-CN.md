@@ -105,6 +105,13 @@ ignore_tmux_sessions = ["agent-watch"]
 [ui]
 conversation_preview = false
 
+[persistence]
+enabled = false
+directory = ""
+interval_seconds = 300
+restore_on_start = true
+backup_on_shutdown = true
+
 [notifications]
 console = true
 tmux = true
@@ -125,11 +132,57 @@ token = ""
 
 所有选项见 [config.example.toml](../config.example.toml)。也可通过 `--config`、
 `--state-dir`、`AGENT_WATCH_CONFIG` 或 `AGENT_WATCH_STATE_DIR` 覆盖默认路径。修改
-配置后需要重启 daemon。
+配置后需要重启 daemon。`AGENT_WATCH_PERSIST_DIR` 可提供可选的历史备份目录；设置该
+变量会直接启用持久化，无需把某台机器的具体路径写进配置文件。
 
 默认通知只输出到本机 console 和已连接的 tmux 客户端。只有显式配置通知渠道才会产生
 网络请求。公共 ntfy 主题名可能相当于访问凭据；敏感环境应使用带认证的长随机主题或
 私有服务器。除非明确设置 `allow_insecure_http = true`，否则拒绝明文 HTTP 端点。
+
+### 临时容器与慢速持久化存储
+
+Agent Watch 可以让活跃历史继续位于容器本地高速文件系统，同时通过后台线程把恢复快照
+复制到较慢的持久化存储。这样无需把实时 SQLite WAL 数据库直接运行在网络文件系统上。
+该功能默认关闭，也不会使用仓库相对路径或硬编码的安装路径。
+
+在源码 checkout 之外创建一个私有目录，然后通过环境变量提供路径：
+
+```bash
+export AGENT_WATCH_PERSIST_DIR=/absolute/path/to/private/agent-watch-history
+agent-watch daemon
+```
+
+也可以写入权限为 `0600` 的私有配置：
+
+```toml
+[persistence]
+enabled = true
+directory = "/absolute/path/to/private/agent-watch-history"
+interval_seconds = 300
+restore_on_start = true
+backup_on_shutdown = true
+```
+
+daemon 启动后会立即执行一次增量备份，之后按配置周期在后台执行，不阻塞会话监控；正常
+退出时最多等待 20 秒完成一次尽力而为的最终备份。启动时只恢复本地缺失的文件，不会
+覆盖更新的本地 transcript 或非空本地数据库。新容器中应先启动 Agent Watch，再启动或
+恢复提供方会话。持续增长的 JSONL 会先验证已有前缀，只追加新增的完整记录；完整复制
+采用原子替换，恢复时会忽略容器强杀可能留下的不完整末行。
+
+备份只包含 `~/.codex/sessions`、`~/.claude/projects`、SQLite 在线一致性快照和不含
+本机路径的 manifest。Codex/Claude 认证、设置、缓存、当前进程元数据、通知凭据及 hook
+日志都不会被复制。原始 transcript 仍可能包含提示词、回答、代码、工具输出或秘密；
+Agent Watch 会将备份目录设为 `0700`、文件设为 `0600`，但使用者仍需检查存储 ACL。
+
+手动诊断命令使用相同的安全格式：
+
+```bash
+agent-watch backup-history --destination /absolute/persistent/directory
+agent-watch restore-history --source /absolute/persistent/directory
+```
+
+提供方 transcript 采用追加式保留：本地删除的文件不会自动从持久化存储删除。不再需要
+这些历史时，应明确删除专用备份目录。
 
 ### Cursor 和 VS Code 原生通知
 

@@ -25,6 +25,11 @@ experimental.
   original working directory and provider session ID in a new, independent tmux
   session; unavailable records explain why they cannot be resumed, and Esc
   returns to the main list.
+- Opt-in ephemeral-container history persistence. A background worker keeps live
+  state on local storage while incrementally backing up Codex/Claude transcripts
+  and an online SQLite snapshot to a private operator-selected directory, then
+  restores only missing data in a fresh container. Authentication and settings
+  are excluded, and no installation path is embedded in the public repository.
 
 ### Changed
 

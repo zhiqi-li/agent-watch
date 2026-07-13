@@ -22,6 +22,20 @@ ignore_tmux_sessions = ["agent-watch"]
 # UI to show or hide it temporarily.
 conversation_preview = false
 
+# Optional protection for session history in ephemeral containers. Active files
+# stay on fast local storage; a background worker incrementally copies only
+# Codex/Claude transcripts plus a consistent Agent Watch database snapshot.
+# Authentication and provider settings are never included. Use a private,
+# persistent directory outside the source checkout. AGENT_WATCH_PERSIST_DIR can
+# supply this path at runtime and enables persistence without editing this file.
+[persistence]
+enabled = false
+directory = ""
+# directory = "/absolute/path/to/private/agent-watch-history"
+interval_seconds = 300
+restore_on_start = true
+backup_on_shutdown = true
+
 [notifications]
 console = true
 tmux = true

@@ -38,6 +38,26 @@ cached only in dashboard process memory. It is not written to SQLite. The previe
 is designed to omit reasoning, system instructions, tool arguments, and tool
 outputs, but this is not a formal data-loss-prevention boundary.
 
+Optional ephemeral-container persistence is disabled by default. When enabled,
+it copies `~/.codex/sessions`, `~/.claude/projects`, and a consistent Agent Watch
+SQLite snapshot to the operator-selected filesystem directory. The backup does
+not include provider authentication or settings, Agent Watch configuration,
+hook logs, or current-process session metadata. Provider transcripts themselves
+can contain prompts, responses, source code, tool output, filesystem paths, and
+secrets. The destination is therefore sensitive even though it is not a remote
+notification channel. Agent Watch applies directory mode `0700`, file mode
+`0600`, rejects symlinked transcript files, atomically replaces full copies, and
+uses prefix-verified, resumable appends for complete JSONL records. Restore omits
+an incomplete final JSONL record that an abrupt process kill may leave behind.
+Storage-level ACLs and administrator access remain outside its control.
+
+Persistent provider transcript backups are additive and are not governed by
+`monitor.retention_days`: deleting a local transcript does not delete its backup.
+The SQLite snapshot reflects normal database retention on each replacement.
+Operators must delete the dedicated persistent directory when the transcript
+backup is no longer needed. Automatic restore fills only missing local files and
+does not overwrite existing transcripts or a non-empty local database.
+
 Delivered notification/outbox history and stale sessions are pruned after 30
 days by default. Configure `monitor.retention_days`; pending delivery records are
 preserved so failed notifications can still retry. Stop the daemon, then use
@@ -84,6 +104,8 @@ authentication or a private server for sensitive work.
 ## Operator controls
 
 - Keep the config file mode `0600` and state directory mode `0700`.
+- Keep any configured persistence directory outside public source checkouts,
+  verify its filesystem ACLs, and treat every backed-up transcript as sensitive.
 - Use `include_cwd = false` and `include_message_preview = false` unless disclosure
   is explicitly acceptable.
 - Keep `ui.conversation_preview = false` (the default) when selected text must not
