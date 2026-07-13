@@ -41,7 +41,7 @@ import urllib.request
 import uuid
 from typing import Any, Iterable, Mapping, Sequence
 
-from . import __version__
+from . import __version__, persistence
 from .processes import (
     ProcessInfo,
     exact_agent_processes,
@@ -78,6 +78,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # Conversation text can be sensitive on shared terminals, so public
         # installations opt in explicitly. Pressing "p" toggles it at runtime.
         "conversation_preview": False,
+    },
+    "persistence": {
+        # Disabled unless explicitly enabled here or with
+        # AGENT_WATCH_PERSIST_DIR. The live database and transcripts remain on
+        # fast local storage; only privacy-scoped snapshots use the slow store.
+        "enabled": False,
+        "directory": "",
+        "interval_seconds": 300.0,
+        "restore_on_start": True,
+        "backup_on_shutdown": True,
     },
     "notifications": {
         "console": True,
@@ -239,6 +249,23 @@ def validate_config(config: Mapping[str, Any]) -> None:
         raise ValueError("ui must be a TOML table")
     if not isinstance(ui.get("conversation_preview"), bool):
         raise ValueError("ui.conversation_preview must be true or false (without quotes)")
+
+    persistence_config = config.get("persistence", {})
+    if not isinstance(persistence_config, Mapping):
+        raise ValueError("persistence must be a TOML table")
+    for key in ("enabled", "restore_on_start", "backup_on_shutdown"):
+        if not isinstance(persistence_config.get(key), bool):
+            raise ValueError(f"persistence.{key} must be true or false (without quotes)")
+    if not isinstance(persistence_config.get("directory"), str):
+        raise ValueError("persistence.directory must be a string")
+    persistence_interval = persistence_config.get("interval_seconds")
+    if (
+        isinstance(persistence_interval, bool)
+        or not isinstance(persistence_interval, (int, float))
+        or not math.isfinite(float(persistence_interval))
+        or persistence_interval <= 0
+    ):
+        raise ValueError("persistence.interval_seconds must be a positive number")
 
     notifications = config.get("notifications", {})
     if not isinstance(notifications, Mapping):
@@ -2621,6 +2648,26 @@ def drain_spool(
 
 def run_daemon(args: argparse.Namespace, config: Mapping[str, Any]) -> int:
     state_dir = pathlib.Path(args.state_dir)
+    try:
+        persistence_settings = persistence.settings_from_config(config)
+    except ValueError as exc:
+        print(f"Persistence configuration error: {exc}", file=sys.stderr)
+        return 2
+    if persistence_settings is not None and persistence_settings.restore_on_start:
+        try:
+            restored = persistence.restore_history(
+                persistence_settings.directory,
+                home=HOME,
+                state_dir=state_dir,
+            )
+            if restored.files_copied or restored.database_copied:
+                print(restored.summary("history restore"), flush=True)
+        except (OSError, sqlite3.Error, persistence.PersistenceError) as exc:
+            print(
+                f"[{iso_time()}] history restore warning: {clean_text(exc, 500)}",
+                file=sys.stderr,
+                flush=True,
+            )
     db = StateDB(state_dir)
     if args.notify_existing is not None:
         config = deep_merge(dict(config), {"monitor": {"notify_existing": args.notify_existing}})
@@ -2632,16 +2679,30 @@ def run_daemon(args: argparse.Namespace, config: Mapping[str, Any]) -> int:
         db.close()
         return 1
     if args.once:
+        exit_code = 0
         try:
             db.prune(float(config["monitor"].get("retention_days", 30)))
             drain_spool(db, state_dir, config)
             observations = scan_once(db, config)
             notified = notify_due(db, config)
             print(f"scan: {len(observations)} sessions, {notified} notifications")
+            if persistence_settings is not None:
+                try:
+                    backed_up = persistence.backup_history(
+                        persistence_settings.directory,
+                        home=HOME,
+                        state_dir=state_dir,
+                    )
+                    print(backed_up.summary("history backup"))
+                    if backed_up.files_failed:
+                        exit_code = 1
+                except (OSError, sqlite3.Error, persistence.PersistenceError) as exc:
+                    print(f"History backup failed: {clean_text(exc, 500)}", file=sys.stderr)
+                    exit_code = 1
         finally:
             lock.close()
             db.close()
-        return 0
+        return exit_code
 
     stopping = False
 
@@ -2654,6 +2715,17 @@ def run_daemon(args: argparse.Namespace, config: Mapping[str, Any]) -> int:
     interval = max(0.5, float(config["monitor"]["interval_seconds"]))
     retention_days = float(config["monitor"].get("retention_days", 30))
     last_prune = 0.0
+    backup_worker = (
+        persistence.BackupWorker(
+            persistence_settings,
+            home=HOME,
+            state_dir=state_dir,
+        )
+        if persistence_settings is not None
+        else None
+    )
+    if backup_worker is not None:
+        backup_worker.start_if_due(force=True)
     print(f"agent-watch {VERSION} started; polling every {interval:g}s", flush=True)
     try:
         while not stopping:
@@ -2669,6 +2741,31 @@ def run_daemon(args: argparse.Namespace, config: Mapping[str, Any]) -> int:
                 notify_due(db, config)
                 db.set_meta("last_success", f"{len(observations)} sessions")
                 db.set_meta("last_error", "")
+                if backup_worker is not None:
+                    outcome = backup_worker.poll()
+                    if outcome is not None:
+                        if outcome.error:
+                            message = clean_text(outcome.error, 500)
+                            db.set_meta("persistence_last_error", message)
+                            print(
+                                f"[{iso_time()}] history backup warning: {message}",
+                                file=sys.stderr,
+                                flush=True,
+                            )
+                        elif outcome.stats is not None:
+                            db.set_meta(
+                                "persistence_last_success",
+                                outcome.stats.summary("history backup"),
+                            )
+                            db.set_meta("persistence_last_error", "")
+                            if outcome.stats.files_failed:
+                                print(
+                                    f"[{iso_time()}] history backup warning: "
+                                    f"{outcome.stats.files_failed} files failed",
+                                    file=sys.stderr,
+                                    flush=True,
+                                )
+                    backup_worker.start_if_due()
             except Exception as exc:  # keep the monitor alive, but make the failure visible
                 with contextlib.suppress(sqlite3.Error):
                     db.conn.rollback()
@@ -2682,6 +2779,19 @@ def run_daemon(args: argparse.Namespace, config: Mapping[str, Any]) -> int:
                 time.sleep(min(0.5, end - time.monotonic()))
     finally:
         db.set_meta("heartbeat", "stopped")
+        if backup_worker is not None:
+            outcome = backup_worker.shutdown(
+                final_backup=bool(persistence_settings.backup_on_shutdown),
+            )
+            if outcome is not None and outcome.error:
+                message = clean_text(outcome.error, 500)
+                with contextlib.suppress(sqlite3.Error):
+                    db.set_meta("persistence_last_error", message)
+                print(
+                    f"[{iso_time()}] history backup warning: {message}",
+                    file=sys.stderr,
+                    flush=True,
+                )
         lock.close()
         db.close()
     return 0
@@ -3165,6 +3275,46 @@ def clear_history_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def backup_history_command(args: argparse.Namespace, config: Mapping[str, Any]) -> int:
+    try:
+        settings = persistence.settings_from_config(
+            config,
+            directory_override=args.destination,
+            force=True,
+        )
+        assert settings is not None
+        stats = persistence.backup_history(
+            settings.directory,
+            home=HOME,
+            state_dir=pathlib.Path(args.state_dir),
+        )
+    except (OSError, sqlite3.Error, ValueError, persistence.PersistenceError) as exc:
+        print(f"History backup failed: {clean_text(exc, 500)}", file=sys.stderr)
+        return 1
+    print(stats.summary("history backup"))
+    return 1 if stats.files_failed else 0
+
+
+def restore_history_command(args: argparse.Namespace, config: Mapping[str, Any]) -> int:
+    try:
+        settings = persistence.settings_from_config(
+            config,
+            directory_override=args.source,
+            force=True,
+        )
+        assert settings is not None
+        stats = persistence.restore_history(
+            settings.directory,
+            home=HOME,
+            state_dir=pathlib.Path(args.state_dir),
+        )
+    except (OSError, sqlite3.Error, ValueError, persistence.PersistenceError) as exc:
+        print(f"History restore failed: {clean_text(exc, 500)}", file=sys.stderr)
+        return 1
+    print(stats.summary("history restore"))
+    return 1 if stats.files_failed else 0
+
+
 def test_notification(args: argparse.Namespace, config: Mapping[str, Any]) -> int:
     db = StateDB(pathlib.Path(args.state_dir))
     now = utc_now()
@@ -3298,6 +3448,22 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("uninstall-hooks", help="remove only agent-watch hooks")
     clear = sub.add_parser("clear-history", help="delete locally retained session history")
     clear.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    backup = sub.add_parser(
+        "backup-history",
+        help="copy provider transcripts and an online database snapshot to persistent storage",
+    )
+    backup.add_argument(
+        "--destination",
+        help="absolute persistent directory (default: configured persistence directory)",
+    )
+    restore = sub.add_parser(
+        "restore-history",
+        help="restore missing local history from persistent storage",
+    )
+    restore.add_argument(
+        "--source",
+        help="absolute persistent directory (default: configured persistence directory)",
+    )
     return parser
 
 
@@ -3355,6 +3521,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return uninstall_hooks(args)
     if args.command == "clear-history":
         return clear_history_command(args)
+    if args.command == "backup-history":
+        return backup_history_command(args, config)
+    if args.command == "restore-history":
+        return restore_history_command(args, config)
     parser.error("unknown command")
     return 2
 

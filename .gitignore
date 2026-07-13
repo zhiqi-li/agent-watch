@@ -32,6 +32,7 @@ agent-watch.toml
 *.db-shm
 *.log
 *.agent-watch-backup-*
+.agent-watch-persistence/
 
 # Editors and operating systems
 .idea/

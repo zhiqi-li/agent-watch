@@ -125,6 +125,13 @@ ignore_tmux_sessions = ["agent-watch"]
 [ui]
 conversation_preview = false
 
+[persistence]
+enabled = false
+directory = ""
+interval_seconds = 300
+restore_on_start = true
+backup_on_shutdown = true
+
 [notifications]
 console = true
 tmux = true
@@ -145,7 +152,9 @@ token = ""
 
 See [config.example.toml](config.example.toml) for every option. You can override
 the default paths with `--config`, `--state-dir`, `AGENT_WATCH_CONFIG`, or
-`AGENT_WATCH_STATE_DIR`. Restart the daemon after changing configuration.
+`AGENT_WATCH_STATE_DIR`. `AGENT_WATCH_PERSIST_DIR` supplies the optional history
+backup directory and enables persistence without putting an installation-specific
+path in configuration. Restart the daemon after changing configuration.
 
 By default, notification output stays on the local console and attached tmux
 clients. Network requests occur only for notification channels that you
@@ -153,6 +162,59 @@ explicitly configure. Public ntfy topic names can behave like bearer
 credentials; use a long random topic with authentication or a private server
 for sensitive work. Plain HTTP endpoints are rejected unless
 `allow_insecure_http = true` is explicitly set.
+
+### Ephemeral containers and slow persistent storage
+
+Agent Watch can keep active history on a container's fast local filesystem while
+copying recovery snapshots to slower persistent storage in a background thread.
+This avoids running the live SQLite WAL database directly on a network filesystem.
+Persistence is disabled by default and never uses a repository-relative or
+hard-coded installation path.
+
+Create a private directory outside the source checkout and either export its path:
+
+```bash
+export AGENT_WATCH_PERSIST_DIR=/absolute/path/to/private/agent-watch-history
+agent-watch daemon
+```
+
+or configure it in the private mode-`0600` config file:
+
+```toml
+[persistence]
+enabled = true
+directory = "/absolute/path/to/private/agent-watch-history"
+interval_seconds = 300
+restore_on_start = true
+backup_on_shutdown = true
+```
+
+The daemon immediately starts an incremental backup, repeats it at the configured
+interval without blocking session monitoring, and waits up to 20 seconds for a
+best-effort final backup during graceful shutdown. At startup it restores only
+missing local files, so it does not replace newer live transcripts or a non-empty
+local database. For a fresh container, start Agent Watch before starting or
+resuming provider sessions. Growing JSONL transcripts are prefix-verified and
+only their new complete records are appended; full copies use atomic replacement,
+and restore ignores an incomplete final record left by an abrupt container kill.
+
+The backup contains only `~/.codex/sessions`, `~/.claude/projects`, an online
+SQLite snapshot, and a path-free manifest. It deliberately excludes Codex and
+Claude authentication, settings, caches, current-process metadata, notification
+credentials, and hook logs. Raw provider transcripts can still contain prompts,
+responses, code, tool output, and secrets; Agent Watch enforces mode `0700` on the
+backup directory and `0600` on files, but operators must also verify storage ACLs.
+
+Manual diagnostics use the same safe format:
+
+```bash
+agent-watch backup-history --destination /absolute/persistent/directory
+agent-watch restore-history --source /absolute/persistent/directory
+```
+
+Backups are additive for provider transcripts: files removed locally are not
+automatically deleted from persistent storage. Delete the dedicated backup
+directory explicitly when its retained transcripts are no longer required.
 
 ### Cursor and VS Code native notifications
 
