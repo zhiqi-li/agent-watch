@@ -289,8 +289,17 @@ class DashboardTests(unittest.TestCase):
                     ),
                     stderr="",
                 ),
+                completed(
+                    [],
+                    0,
+                    stdout=(
+                        f"Side from main thread · Ctrl+C to return\n{marker}\n"
+                        if provider == "codex"
+                        else f"Press Space to dismiss\n{marker}\n"
+                    ),
+                    stderr="",
+                ),
                 completed([], 0, stdout="", stderr=""),
-                completed([], 0, stdout="main conversation\n", stderr=""),
             ]
             with (
                 self.subTest(provider=provider),
@@ -322,19 +331,21 @@ class DashboardTests(unittest.TestCase):
             ]
             self.assertEqual(len(dismiss_calls), 1)
 
-    def test_codex_side_dismissal_retries_only_while_side_remains_visible(self):
+    def test_codex_side_dismissal_waits_for_hint_and_sends_only_once(self):
         completed = subprocess.CompletedProcess
         marker = "AWP0123456789AB"
         results = [
-            completed([], 0, stdout="", stderr=""),
+            completed([], 0, stdout=f"side loading\n{marker}\n", stderr=""),
             completed(
                 [],
                 0,
-                stdout=f"side · Ctrl+C to exit\n{marker}|goal|done|now|next|none|END\n",
+                stdout=(
+                    "Side from main thread · main finished · Ctrl+C to return\n"
+                    f"{marker}|goal|done|now|next|none|END\n"
+                ),
                 stderr="",
             ),
             completed([], 0, stdout="", stderr=""),
-            completed([], 0, stdout="main conversation\n", stderr=""),
         ]
         with (
             mock.patch.object(ui.time, "sleep"),
@@ -346,7 +357,25 @@ class DashboardTests(unittest.TestCase):
         dismiss_calls = [
             call for call in run.call_args_list if call.args[0][-1] == "C-c"
         ]
-        self.assertEqual(len(dismiss_calls), 2)
+        self.assertEqual(len(dismiss_calls), 1)
+
+    def test_stale_marker_without_exit_hint_never_sends_ctrl_c(self):
+        completed = subprocess.CompletedProcess
+        marker = "AWP0123456789AB"
+        results = [
+            completed([], 0, stdout=f"main conversation\n{marker}\n", stderr="")
+            for _attempt in range(5)
+        ]
+        with (
+            mock.patch.object(ui.time, "sleep"),
+            mock.patch.object(ui.subprocess, "run", side_effect=results) as run,
+        ):
+            self.assertFalse(
+                ui._dismiss_progress_side_ui(["tmux"], "%1", marker, "codex")
+            )
+        self.assertFalse(
+            any(call.args[0][-1] == "C-c" for call in run.call_args_list)
+        )
 
     def test_progress_probe_clears_verified_draft_when_submit_fails(self):
         completed = subprocess.CompletedProcess
