@@ -13,7 +13,7 @@ import pathlib
 import stat
 import sys
 import time
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 
 
 @dataclasses.dataclass(slots=True)
@@ -89,6 +89,33 @@ def _linux_process_environment(
     return values
 
 
+def _linux_process_command_line(
+    pid: int, proc_root: pathlib.Path = pathlib.Path("/proc")
+) -> tuple[str, ...]:
+    try:
+        data = (proc_root / str(pid) / "cmdline").read_bytes()
+    except OSError:
+        return ()
+    return tuple(
+        item.decode("utf-8", "replace") for item in data.split(b"\0") if item
+    )
+
+
+def _is_claude_control_process(
+    provider: str, command_line: Sequence[str]
+) -> bool:
+    """Return whether a process is Claude infrastructure, not a user session."""
+
+    if provider != "claude" or len(command_line) < 2:
+        return False
+    subcommand = command_line[1]
+    return subcommand in {"bg-pty-host", "bg-spare"} or (
+        subcommand == "daemon"
+        and len(command_line) >= 3
+        and command_line[2] == "run"
+    )
+
+
 def _linux_agent_processes(
     proc_root: pathlib.Path = pathlib.Path("/proc"), uid: int | None = None
 ) -> list[ProcessInfo]:
@@ -114,6 +141,10 @@ def _linux_agent_processes(
             continue
         details = _linux_process_details(pid, proc_root)
         if details is None or details[0] == "Z":
+            continue
+        if _is_claude_control_process(
+            provider, _linux_process_command_line(pid, proc_root)
+        ):
             continue
         state, start_time = details
         try:
@@ -204,7 +235,16 @@ def _darwin_agent_processes(
     result: list[ProcessInfo] = []
     owner = os.getuid() if uid is None else uid
     errors = _psutil_errors(psutil_module)
-    attributes = ["pid", "uids", "name", "status", "create_time", "cwd", "terminal"]
+    attributes = [
+        "pid",
+        "uids",
+        "name",
+        "status",
+        "create_time",
+        "cwd",
+        "terminal",
+        "cmdline",
+    ]
     for process in psutil_module.process_iter(attributes):
         try:
             info = process.info
@@ -213,6 +253,11 @@ def _darwin_agent_processes(
                 continue
             provider = str(info.get("name") or "")
             if provider not in {"codex", "claude"}:
+                continue
+            command_line = info.get("cmdline")
+            if not isinstance(command_line, (list, tuple)):
+                command_line = ()
+            if _is_claude_control_process(provider, command_line):
                 continue
             state = str(info.get("status") or "")
             if state == str(getattr(psutil_module, "STATUS_ZOMBIE", "zombie")):

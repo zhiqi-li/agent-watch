@@ -64,6 +64,8 @@ BLUE = "color(44)"
 PURPLE = "color(141)"
 SELECT_BG = "color(237)"
 
+GIT_CONTEXT_CACHE: dict[str, tuple[float, str, str]] = {}
+
 SPINNER = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 STATE_META: dict[str, tuple[str, str, str, int]] = {
     "needs_input": ("?", "Needs input", YELLOW, 0),
@@ -225,6 +227,49 @@ def project_name(cwd: str) -> str:
     if name in {".worktree", "worktree"} and len(path.parts) > 1:
         name = path.parts[-2]
     return sanitize(name, 100)
+
+
+def git_context(cwd: str, refresh_seconds: float = 5.0) -> tuple[str, str]:
+    """Return the repository root and branch for a working directory."""
+
+    if not cwd or len(cwd) > 4096 or "\0" in cwd:
+        return "", ""
+    now = time.monotonic()
+    cached = GIT_CONTEXT_CACHE.get(cwd)
+    if cached and now - cached[0] < max(0.0, refresh_seconds):
+        return cached[1], cached[2]
+    root = ""
+    branch = ""
+    try:
+        if pathlib.Path(cwd).is_dir():
+            run = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    cwd,
+                    "rev-parse",
+                    "--show-toplevel",
+                    "--abbrev-ref",
+                    "HEAD",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=1,
+                check=False,
+            )
+            lines = run.stdout.splitlines() if run.returncode == 0 else []
+            if len(lines) >= 2:
+                root = sanitize(lines[0], 1000)
+                branch = sanitize(lines[1], 200)
+                if branch == "HEAD":
+                    branch = "detached HEAD"
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+    GIT_CONTEXT_CACHE[cwd] = (now, root, branch)
+    if len(GIT_CONTEXT_CACHE) > 128:
+        oldest = min(GIT_CONTEXT_CACHE, key=lambda key: GIT_CONTEXT_CACHE[key][0])
+        GIT_CONTEXT_CACHE.pop(oldest, None)
+    return root, branch
 
 
 def sanitize(value: Any, limit: int = 200) -> str:
@@ -1418,6 +1463,28 @@ def render_detail(view: DashboardView, width: int, height: int) -> RenderableTyp
         lines.append(
             detail_line("Exited" if state == "exited" else "Duration", duration)
         )
+    cwd = str(row.get("cwd") or "")
+    repository_root, branch = git_context(cwd)
+    lines.append(
+        detail_line(
+            "Path",
+            shorten_middle(cwd, max(14, width - 12)) if cwd else "—",
+        )
+    )
+    branch_text = branch
+    if (
+        branch
+        and repository_root
+        and pathlib.Path(repository_root) != pathlib.Path(cwd)
+    ):
+        branch_text = f"{branch}  ·  repo {pathlib.Path(repository_root).name}"
+    lines.append(
+        detail_line(
+            "Branch",
+            shorten_middle(branch_text, max(14, width - 12)) if branch_text else "—",
+            PURPLE if branch_text else MUTED,
+        )
+    )
     lines.append(
         detail_line(
             "Last tmux" if state == "exited" else "tmux",
@@ -1432,7 +1499,15 @@ def render_detail(view: DashboardView, width: int, height: int) -> RenderableTyp
                 "Server", shorten_middle(socket_path, max(16, width - 12)), BLUE
             )
         )
-    if height >= 20:
+    if height >= 22:
+        session_id = sanitize(row.get("session_id") or "", 300)
+        lines.append(
+            detail_line(
+                "Session",
+                shorten_middle(session_id, max(14, width - 12)) if session_id else "—",
+            )
+        )
+    if height >= 18:
         process_text = f"PID {row.get('pid') or '—'}  ·  {source_label(str(row.get('source') or ''))}"
         lines.append(
             detail_line("Process", shorten_middle(process_text, max(14, width - 12)))

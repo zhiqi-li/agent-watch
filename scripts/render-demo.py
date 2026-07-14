@@ -184,7 +184,13 @@ def render(output: pathlib.Path) -> None:
         height=HEIGHT,
         highlight=False,
     )
-    with mock.patch("agent_watch.dashboard.time.time", return_value=DEMO_NOW):
+    with (
+        mock.patch("agent_watch.dashboard.time.time", return_value=DEMO_NOW),
+        mock.patch(
+            "agent_watch.dashboard.git_context",
+            return_value=("/workspace/checkout-api", "feature/cursor-pagination"),
+        ),
+    ):
         console.print(render_dashboard(build_demo(), WIDTH, HEIGHT))
     svg = console.export_svg(
         title="Agent Watch — Synthetic Demo",

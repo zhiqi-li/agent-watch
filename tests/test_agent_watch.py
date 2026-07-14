@@ -188,6 +188,37 @@ class AgentWatchTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertNotEqual(first, changed)
 
+    def test_pane_location_requires_the_process_terminal(self):
+        pane = aw.Pane(
+            pane_id="%4",
+            session="3",
+            window="0",
+            index="0",
+            pid=100,
+            tty="/dev/pts/9",
+            command="codex",
+            cwd="/repo",
+            title="repo",
+            dead=False,
+            socket_path="/tmp/tmux-0/default",
+        )
+        inherited = aw.ProcessInfo(
+            pid=200,
+            provider="claude",
+            start_time="1",
+            state="S",
+            cwd="/root",
+            tty="",
+            tmux_socket="/tmp/tmux-0/default",
+            tmux_pane="%4",
+        )
+        wrong_terminal = aw.dataclasses.replace(inherited, tty="/dev/pts/11")
+        attached = aw.dataclasses.replace(inherited, tty="/dev/pts/9")
+
+        self.assertIsNone(aw.pane_for_process(inherited, [pane]))
+        self.assertIsNone(aw.pane_for_process(wrong_terminal, [pane]))
+        self.assertIs(aw.pane_for_process(attached, [pane]), pane)
+
     def test_activity_timestamp_persists_until_real_change(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp)
