@@ -2158,15 +2158,13 @@ def _capture_progress_pane(
     )
 
 
-def _provider_composer_is_empty(
+def _provider_composer_state_at_start(
     base: Sequence[str], pane_id: str, provider: str
-) -> bool:
-    """Verify the provider's composer is visibly empty.
+) -> str:
+    """Return ``empty`` or ``draft`` when the cursor is at the composer start.
 
-    This check deliberately fails closed. A cursor at the prompt's first input
-    column is not enough because a user can move Home in a non-empty draft.
-    Codex distinguishes its empty placeholder with dim ANSI styling; Claude's
-    empty prompt line contains only its prompt glyph and whitespace.
+    The provider prompt glyph prevents a Home key on a wrapped continuation
+    line from being mistaken for the beginning of a multiline composer.
     """
     cursor = subprocess.run(
         list(base)
@@ -2187,9 +2185,9 @@ def _provider_composer_is_empty(
             int(value) for value in cursor.stdout.strip().split("|", 1)
         )
     except (AttributeError, TypeError, ValueError):
-        return False
+        return ""
     if cursor.returncode != 0 or cursor_x != 2 or cursor_y < 0:
-        return False
+        return ""
 
     capture = subprocess.run(
         list(base) + ["capture-pane", "-e", "-p", "-t", pane_id],
@@ -2200,14 +2198,18 @@ def _provider_composer_is_empty(
     )
     lines = capture.stdout.splitlines() if capture.returncode == 0 else []
     if cursor_y >= len(lines):
-        return False
+        return ""
     line = lines[cursor_y]
     plain = ANSI_RE.sub("", line).replace("\u00a0", " ")
     if provider == "codex":
-        return plain.startswith("› ") and "\x1b[2m" in line
+        if not plain.startswith("› "):
+            return ""
+        return "empty" if "\x1b[2m" in line else "draft"
     if provider == "claude":
-        return plain.strip() == "❯"
-    return False
+        if not plain.startswith("❯"):
+            return ""
+        return "empty" if plain.strip() == "❯" else "draft"
+    return ""
 
 
 def _progress_prompt_is_draft(capture: str, prompt: str) -> bool:
@@ -2306,9 +2308,10 @@ def probe_session_progress(
 ) -> ProgressProbeResult:
     """Ask an eligible hidden Codex/Claude pane for a progress summary.
 
-    Running and auto-wait panes are eligible. Ready panes and panes currently
-    active in a tmux client additionally require a verified empty provider
-    composer. The saved pane identity is validated. The provider answer is
+    Running and auto-wait panes are eligible. For ready panes and panes active
+    in another tmux client, the cursor is first moved to a verified provider
+    composer start. An existing single-line draft becomes part of the temporary
+    question. The saved pane identity is validated. The provider answer is
     captured from its temporary side UI and is never retained in the monitor
     database or provider transcript.
     """
@@ -2363,17 +2366,30 @@ def probe_session_progress(
             )
         active = pane_id in {line.strip() for line in clients.stdout.splitlines()}
         state = str(row.get("state") or "")
-        if (active or state == "ready") and not _provider_composer_is_empty(
-            base, pane_id, provider
-        ):
-            subject = "active pane" if active else "ready session"
-            return ProgressProbeResult(
-                session_key=session_key,
-                error=f"The {subject}'s provider composer is not verifiably empty",
+        composer_state = ""
+        if active or state == "ready":
+            position = subprocess.run(
+                base + ["send-keys", "-t", pane_id, "Home"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
             )
+            if position.returncode == 0:
+                composer_state = _provider_composer_state_at_start(
+                    base, pane_id, provider
+                )
+            if not composer_state:
+                subject = "active pane" if active else "ready session"
+                return ProgressProbeResult(
+                    session_key=session_key,
+                    error=f"The {subject}'s provider composer could not be positioned safely",
+                )
 
         marker = "AWP" + secrets.token_hex(6).upper()
         prompt = _progress_prompt(marker)
+        if composer_state == "draft":
+            prompt += " "
         deadline = time.monotonic() + max(1.0, timeout)
         send = subprocess.run(
             base

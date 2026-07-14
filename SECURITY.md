@@ -46,12 +46,12 @@ session/transcript files, and hook payloads. It writes local state under
 when `install-hooks` or `uninstall-hooks` is explicitly run.
 
 The dashboard is passive by default. Pressing `b` or `B` explicitly authorizes a
-fixed `/btw` progress question to one or more eligible agent panes. Running and
-auto-wait panes are eligible; ready panes additionally require a provider-specific
-empty-composer check. Needs-input and error panes are blocked. Before sending keys,
-Agent Watch verifies the pane identity and rejects tmux copy mode. A pane that is
-active in another tmux client must also pass the empty-composer check. Returned
-summaries remain in dashboard memory only.
+fixed `/btw` progress question to one or more eligible agent panes. Needs-input
+and error panes are blocked. Before sending keys, Agent Watch verifies the pane
+identity and rejects tmux copy mode. For ready panes and panes active in another
+tmux client, it moves the cursor to a verified provider composer start. Any
+existing single-line draft is submitted as part of the temporary question.
+Returned summaries remain in dashboard memory only.
 
 Relevant implementation safeguards include parameterized SQLite queries,
 argument-vector subprocess execution, terminal-control sanitization, bounded

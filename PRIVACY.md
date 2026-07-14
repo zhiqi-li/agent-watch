@@ -121,7 +121,8 @@ authentication or a private server for sensitive work.
   terminal recording and shared scrollback for sensitive sessions.
 - Use `b`/`B` only when sending the fixed progress question to those sessions and
   displaying the returned summary is acceptable. Agent Watch refuses unsupported
-  states and requires an empty provider composer for active or ready panes.
+  states. In active or ready panes, an existing single-line draft is submitted as
+  part of the temporary question after the cursor is moved to the composer start.
 - `agent-watch status --json` is redacted by default. Treat `--full`, database
   rows, logs, screenshots, and bug reports as sensitive.
 - Review configured notification endpoints and their credentials regularly.
