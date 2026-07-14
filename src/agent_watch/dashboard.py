@@ -2,8 +2,9 @@
 """Claude-inspired terminal dashboard for agent-watch.
 
 Database access is intentionally read-only: the dashboard opens monitor state
-with SQLite's mode=ro and never participates in daemon/outbox writes. An
-explicit resume action may start an agent in a new tmux session.
+with SQLite's mode=ro and never participates in daemon/outbox writes. Explicit
+operator actions may resume an agent or send a temporary ``/btw`` progress
+question to a validated, hidden tmux pane.
 """
 
 from __future__ import annotations
@@ -15,7 +16,9 @@ import functools
 import json
 import os
 import pathlib
+import queue
 import re
+import secrets
 import select
 import shlex
 import signal
@@ -24,6 +27,7 @@ import stat
 import subprocess
 import sys
 import termios
+import threading
 import time
 import tty
 import unicodedata
@@ -130,6 +134,27 @@ class ConversationCacheEntry:
     preview: dict[str, dict[str, Any]]
     checked_at: float
     used_at: float
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class ProgressSummary:
+    """Provider-neutral task progress returned by a temporary /btw query."""
+
+    goal: str
+    done: str
+    current: str
+    next: str
+    blocker: str
+    provider: str
+    captured_at: float
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class ProgressProbeResult:
+    session_key: str
+    summary: ProgressSummary | None = None
+    error: str = ""
+    bulk: bool = False
 
 
 def _read_json(value: str, fallback: Any) -> Any:
@@ -887,6 +912,9 @@ class DashboardView:
         self.conversation_preview = conversation_preview
         self.context_session_key = ""
         self.context_preview: dict[str, dict[str, Any]] = {}
+        self.progress_summaries: dict[str, ProgressSummary] = {}
+        self.progress_errors: dict[str, str] = {}
+        self.progress_pending: set[str] = set()
         self._ensure_selection()
 
     @property
@@ -916,6 +944,19 @@ class DashboardView:
                 error=snapshot.error,
             )
         self.snapshot = snapshot
+        current_keys = {
+            str(row.get("session_key") or "") for row in snapshot.sessions
+        }
+        self.progress_summaries = {
+            key: summary
+            for key, summary in self.progress_summaries.items()
+            if key in current_keys
+        }
+        self.progress_errors = {
+            key: error
+            for key, error in self.progress_errors.items()
+            if key in current_keys
+        }
         self._ensure_selection()
 
     def _ensure_selection(self) -> None:
@@ -984,6 +1025,21 @@ class DashboardView:
         self.context_session_key = session_key
         self.context_preview = preview
         return changed
+
+    def begin_progress(self, session_key: str) -> bool:
+        if not session_key or session_key in self.progress_pending:
+            return False
+        self.progress_errors.pop(session_key, None)
+        self.progress_pending.add(session_key)
+        return True
+
+    def finish_progress(self, result: ProgressProbeResult) -> None:
+        self.progress_pending.discard(result.session_key)
+        if result.summary is not None:
+            self.progress_summaries[result.session_key] = result.summary
+            self.progress_errors.pop(result.session_key, None)
+        elif result.error:
+            self.progress_errors[result.session_key] = result.error
 
 
 def render_header(view: DashboardView, width: int) -> RenderableType:
@@ -1259,6 +1315,9 @@ def render_sessions(view: DashboardView, width: int, height: int) -> RenderableT
         branch = Text("   ⎿", style=MUTED)
         state_cell = Text(label, style=color)
         context = Text()
+        session_key = str(row.get("session_key") or "")
+        progress = view.progress_summaries.get(session_key)
+        progress_error = view.progress_errors.get(session_key, "")
         if view.history_mode:
             available, reason = resume_availability(row)
             context.append(
@@ -1269,9 +1328,25 @@ def render_sessions(view: DashboardView, width: int, height: int) -> RenderableT
                 ),
                 style=GREEN if available else MUTED,
             )
+        elif session_key in view.progress_pending:
+            context.append("·  asking /btw for global progress…", style=BLUE)
+        elif progress is not None:
+            progress_text = progress.current or progress.done or progress.next
+            context.append(
+                f"·  {sanitize(progress_text, 400) or 'Progress captured'}",
+                style=GREEN,
+            )
+        elif progress_error:
+            context.append("·  /btw progress unavailable", style=RED)
         elif target and compact:
             context.append(f"·  tmux {target}", style=BLUE)
-        if not compact and not view.history_mode:
+        if (
+            not compact
+            and not view.history_mode
+            and session_key not in view.progress_pending
+            and progress is None
+            and not progress_error
+        ):
             context.append(
                 f"·  {source_label(str(row.get('source') or ''))}", style=MUTED
             )
@@ -1363,6 +1438,45 @@ def preview_block(
         heading.append(f"  ·  {clock_time(timestamp)[:5]}", style=FAINT)
     body = Text("\n".join(wrap_preview_lines(entry.get("text"), width, max_lines)))
     return Group(heading, body)
+
+
+def progress_summary_block(
+    summary: ProgressSummary, width: int, height: int
+) -> RenderableType:
+    heading = Text()
+    heading.append("◉ ", style=f"bold {GREEN}")
+    heading.append("Global progress", style=f"bold {TEXT}")
+    heading.append(f"  ·  {clock_time(summary.captured_at)[:5]}", style=FAINT)
+    if height >= 30:
+        fields = (
+            ("Goal", summary.goal, TEXT),
+            ("Done", summary.done, GREEN),
+            ("Current", summary.current, ORANGE),
+            ("Next", summary.next, BLUE),
+            ("Blocked", summary.blocker, YELLOW),
+        )
+    elif height >= 24:
+        fields = (
+            ("Goal", summary.goal, TEXT),
+            ("Current", summary.current, ORANGE),
+            ("Next", summary.next, BLUE),
+            ("Blocked", summary.blocker, YELLOW),
+        )
+    else:
+        fields = (
+            ("Current", summary.current, ORANGE),
+            ("Next", summary.next, BLUE),
+        )
+    value_width = max(8, width - 12)
+    body = [
+        detail_line(
+            label,
+            crop_cells(value or "—", value_width),
+            MUTED if not value else color,
+        )
+        for label, value, color in fields
+    ]
+    return Group(heading, *body)
 
 
 def tool_display_name(name: Any) -> str:
@@ -1519,8 +1633,32 @@ def render_detail(view: DashboardView, width: int, height: int) -> RenderableTyp
         if view.conversation_preview and view.context_session_key == session_key
         else {}
     )
+    progress = view.progress_summaries.get(session_key)
+    progress_error = view.progress_errors.get(session_key, "")
+    progress_pending = session_key in view.progress_pending
     lines.append(rule)
     content_width = max(14, width - 6)
+    progress_cost = 0
+    if progress is not None:
+        lines.append(progress_summary_block(progress, content_width, height))
+        progress_cost = 6 if height >= 30 else 5 if height >= 24 else 3
+        lines.append(rule)
+    elif progress_pending:
+        pending = Text()
+        pending.append("◌ ", style=f"bold {BLUE}")
+        pending.append("Asking /btw for global progress…", style=f"bold {TEXT}")
+        lines.append(pending)
+        progress_cost = 2
+        lines.append(rule)
+    elif progress_error:
+        failure = Text()
+        failure.append("× /btw progress unavailable\n", style=f"bold {RED}")
+        failure.append(
+            crop_cells(progress_error, max(8, content_width - 2)), style=MUTED
+        )
+        lines.append(failure)
+        progress_cost = 3
+        lines.append(rule)
     if height >= 30:
         user_lines, assistant_lines = 4, max(8, height - 20)
     elif height >= 24:
@@ -1529,6 +1667,7 @@ def render_detail(view: DashboardView, width: int, height: int) -> RenderableTyp
         user_lines, assistant_lines = 2, 5
     else:
         user_lines, assistant_lines = 1, 2
+    assistant_lines = max(1, assistant_lines - progress_cost)
 
     user_entry = preview.get("user")
     assistant_entry = preview.get("assistant")
@@ -1649,6 +1788,8 @@ def render_help(width: int) -> RenderableType:
         ("tmux prefix + L", "Return to Agent Watch after opening a session"),
         ("/", "Search projects, paths, or sessions"),
         ("f", "Cycle Current / Attention / Running"),
+        ("b", "Ask selected running session for global progress"),
+        ("B", "Ask all running Codex / Claude sessions"),
         ("p", "Show / hide local session preview"),
         ("r", "Refresh now"),
         ("g / G", "Jump to first / last"),
@@ -1691,6 +1832,7 @@ def render_footer(
             action.append(f"  ·  {count} retained", style=MUTED)
             action_right.append("Enter to browse", style=ORANGE)
         elif row:
+            session_key = str(row.get("session_key") or "")
             provider, provider_color = provider_label(str(row.get("provider") or ""))
             _symbol, label, color = state_visual(
                 str(row.get("state") or "unknown"), view.spinner_index
@@ -1700,6 +1842,8 @@ def render_footer(
             action.append(project_name(str(row.get("cwd") or "")), style=TEXT)
             action.append("  ·  ", style=FAINT)
             action.append(label, style=color)
+            if session_key in view.progress_pending:
+                action.append("  ·  asking /btw…", style=BLUE)
             if view.history_mode:
                 available, reason = resume_availability(row)
                 action_right.append(
@@ -1740,7 +1884,13 @@ def render_footer(
             items.append(("f", "filter"))
     if width >= 120:
         items.extend(
-            [("prefix+L", "back"), ("p", "preview"), ("r", "refresh"), ("?", "help")]
+            [
+                ("prefix+L", "back"),
+                ("b", "progress"),
+                ("p", "preview"),
+                ("r", "refresh"),
+                ("?", "help"),
+            ]
         )
     if not any(key == "q" for key, _label in items):
         items.append(("q", "quit"))
@@ -1949,6 +2099,290 @@ def _tmux_base(socket_path: str) -> list[str]:
     return ["tmux", "-S", socket_path] if socket_path else ["tmux"]
 
 
+def progress_probe_availability(row: Mapping[str, Any] | None) -> str:
+    """Return an explanation when a session cannot be queried safely."""
+    if not row or is_exited_summary(row):
+        return "Select a current session first"
+    provider = str(row.get("provider") or "")
+    if provider not in {"codex", "claude"}:
+        return "Only Codex and Claude sessions support /btw progress snapshots"
+    if str(row.get("state") or "") != "running":
+        return "A /btw progress snapshot is available only while the session is running"
+    pane_id = _command_value(row.get("pane_id") or "", 80)
+    target = _command_value(row.get("tmux_target") or "", 200)
+    if not pane_id.startswith("%") or not target:
+        return "This session has no safe tmux pane to query"
+    return ""
+
+
+def _progress_prompt(marker: str) -> str:
+    return (
+        "/btw Summarize the overall task progress using only this conversation. "
+        "Reply in the conversation's language on exactly one compact line with "
+        "these fields: marker|goal|completed|current|next|blocker|END. "
+        "Keep each field under 48 characters, do not use the | character inside "
+        "a field, and use none when there is no blocker. The marker is "
+        f"{marker}"
+    )
+
+
+def _clean_progress_field(value: str) -> str:
+    # Full-screen TUIs can leave border glyphs between visually wrapped rows.
+    # Keep the model's text while removing those display-only separators.
+    value = re.sub(r"[│┃║]", " ", value)
+    value = re.sub(r"\s+", " ", value)
+    return sanitize(value.strip(" \t\r\n`'\""), 240)
+
+
+def parse_progress_capture(
+    text: str, marker: str, provider: str
+) -> ProgressSummary | None:
+    """Parse the marked, pipe-delimited /btw answer from a tmux capture."""
+    if not text or not marker:
+        return None
+    separator = r"\s*\|\s*"
+    pattern = re.compile(
+        re.escape(marker)
+        + separator
+        + r"(.*?)"
+        + separator
+        + r"(.*?)"
+        + separator
+        + r"(.*?)"
+        + separator
+        + r"(.*?)"
+        + separator
+        + r"(.*?)"
+        + separator
+        + r"END\b",
+        re.DOTALL,
+    )
+    matches = list(pattern.finditer(ANSI_RE.sub("", text)))
+    if not matches:
+        return None
+    goal, done, current, next_step, blocker = (
+        _clean_progress_field(value) for value in matches[-1].groups()
+    )
+    if blocker.casefold() in {
+        "none",
+        "no",
+        "n/a",
+        "na",
+        "无",
+        "无阻塞",
+        "没有",
+        "—",
+        "-",
+    }:
+        blocker = ""
+    if not any((goal, done, current, next_step, blocker)):
+        return None
+    return ProgressSummary(
+        goal=goal,
+        done=done,
+        current=current,
+        next=next_step,
+        blocker=blocker,
+        provider=provider,
+        captured_at=time.time(),
+    )
+
+
+def probe_session_progress(
+    row: Mapping[str, Any], timeout: float = 30.0, poll_seconds: float = 0.25
+) -> ProgressProbeResult:
+    """Ask a hidden running Codex/Claude pane for a temporary progress summary.
+
+    The query is deliberately limited to running panes. It validates the saved
+    pane identity and refuses to type into a pane currently active in any tmux
+    client. The provider answer is captured from its ephemeral overlay and is
+    never written to the monitor database or provider transcript.
+    """
+    session_key = str(row.get("session_key") or "")
+    provider = str(row.get("provider") or "")
+    unavailable = progress_probe_availability(row)
+    if unavailable:
+        return ProgressProbeResult(session_key=session_key, error=unavailable)
+
+    pane_id = _command_value(row.get("pane_id") or "", 80)
+    target = _command_value(row.get("tmux_target") or "", 200)
+    socket_path = _command_value(row.get("tmux_socket") or "", 1000)
+    base = _tmux_base(socket_path)
+    try:
+        check = subprocess.run(
+            base
+            + [
+                "display-message",
+                "-p",
+                "-t",
+                pane_id,
+                "#{session_name}:#{window_index}.#{pane_index}|#{pane_dead}|#{pane_in_mode}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        fields = check.stdout.strip().split("|") if check.returncode == 0 else []
+        if len(fields) != 3 or fields[0] != target or fields[1] != "0":
+            return ProgressProbeResult(
+                session_key=session_key,
+                error="The tmux location is stale; refresh and try again",
+            )
+        if fields[2] != "0":
+            return ProgressProbeResult(
+                session_key=session_key,
+                error="The target pane is in tmux copy mode; leave it before querying",
+            )
+
+        clients = subprocess.run(
+            base + ["list-clients", "-F", "#{pane_id}"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        if clients.returncode != 0:
+            return ProgressProbeResult(
+                session_key=session_key,
+                error="Unable to verify whether the target pane is being viewed",
+            )
+        if pane_id in {line.strip() for line in clients.stdout.splitlines()}:
+            return ProgressProbeResult(
+                session_key=session_key,
+                error="The target pane is active in another client; switch back to Agent Watch first",
+            )
+
+        marker = "AWP" + secrets.token_hex(6).upper()
+        send = subprocess.run(
+            base
+            + [
+                "send-keys",
+                "-t",
+                pane_id,
+                "-l",
+                _progress_prompt(marker),
+                ";",
+                "send-keys",
+                "-t",
+                pane_id,
+                "Enter",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        if send.returncode != 0:
+            return ProgressProbeResult(
+                session_key=session_key,
+                error=sanitize(send.stderr, 200) or "Unable to send /btw to the pane",
+            )
+
+        deadline = time.monotonic() + max(1.0, timeout)
+        while time.monotonic() < deadline:
+            capture = subprocess.run(
+                base
+                + [
+                    "capture-pane",
+                    "-p",
+                    "-J",
+                    "-t",
+                    pane_id,
+                    "-S",
+                    "-120",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+            if capture.returncode != 0:
+                return ProgressProbeResult(
+                    session_key=session_key,
+                    error="The target pane disappeared while waiting for /btw",
+                )
+            summary = parse_progress_capture(capture.stdout, marker, provider)
+            if summary is not None:
+                # Both providers document Space as a way to dismiss the side
+                # answer. The marker proves the answer overlay is present before
+                # this key is sent, avoiding an unsolicited key in the composer.
+                with contextlib.suppress(OSError, subprocess.SubprocessError):
+                    subprocess.run(
+                        base + ["send-keys", "-t", pane_id, "Space"],
+                        capture_output=True,
+                        text=True,
+                        timeout=2,
+                        check=False,
+                    )
+                return ProgressProbeResult(
+                    session_key=session_key, summary=summary
+                )
+            time.sleep(max(0.05, poll_seconds))
+    except (OSError, subprocess.SubprocessError) as exc:
+        return ProgressProbeResult(
+            session_key=session_key,
+            error=sanitize(exc, 200) or "Unable to query session progress",
+        )
+    return ProgressProbeResult(
+        session_key=session_key,
+        error="No /btw progress reply arrived; the provider may need an update",
+    )
+
+
+class ProgressProbeManager:
+    """Run bounded progress probes without blocking dashboard rendering."""
+
+    def __init__(self, max_workers: int = 3):
+        self.jobs: queue.Queue[tuple[dict[str, Any], bool] | None] = queue.Queue()
+        self.results: queue.SimpleQueue[ProgressProbeResult] = queue.SimpleQueue()
+        self.closed = threading.Event()
+        self.workers: list[threading.Thread] = []
+        for index in range(max(1, max_workers)):
+            worker = threading.Thread(
+                target=self._worker,
+                name=f"agent-watch-progress-{index + 1}",
+                daemon=True,
+            )
+            worker.start()
+            self.workers.append(worker)
+
+    def _worker(self) -> None:
+        while not self.closed.is_set():
+            try:
+                job = self.jobs.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if job is None:
+                return
+            row, bulk = job
+            try:
+                result = probe_session_progress(row)
+            except Exception as exc:  # keep one malformed session from killing a worker
+                result = ProgressProbeResult(
+                    session_key=str(row.get("session_key") or ""),
+                    error=sanitize(exc, 200) or "Unexpected progress query failure",
+                )
+            self.results.put(dataclasses.replace(result, bulk=bulk))
+
+    def submit(self, row: Mapping[str, Any], bulk: bool = False) -> None:
+        if not self.closed.is_set():
+            self.jobs.put((dict(row), bulk))
+
+    def poll(self) -> list[ProgressProbeResult]:
+        results: list[ProgressProbeResult] = []
+        while True:
+            try:
+                results.append(self.results.get_nowait())
+            except queue.Empty:
+                return results
+
+    def close(self) -> None:
+        self.closed.set()
+        for _worker in self.workers:
+            self.jobs.put(None)
+
+
 def _current_tmux_socket() -> str:
     value = os.environ.get("TMUX", "")
     return value.rsplit(",", 2)[0] if value.count(",") >= 2 else ""
@@ -2091,7 +2525,7 @@ def dashboard_pane_visible() -> bool:
 
 
 def handle_key(view: DashboardView, key: str, text: str, page_size: int) -> str:
-    """Mutate view and return an action: '', 'quit', 'attach', or 'refresh'."""
+    """Mutate view and return a dashboard action name, or an empty string."""
     if view.searching:
         if key == "escape":
             view.query = ""
@@ -2144,6 +2578,10 @@ def handle_key(view: DashboardView, key: str, text: str, page_size: int) -> str:
         view.searching = True
     elif key == "text" and text == "f":
         view.cycle_filter()
+    elif key == "text" and text == "b" and not view.history_mode:
+        return "progress"
+    elif key == "text" and text == "B" and not view.history_mode:
+        return "progress_all"
     elif key == "text" and text == "p":
         view.conversation_preview = not view.conversation_preview
         if not view.conversation_preview:
@@ -2187,6 +2625,7 @@ def run_dashboard(
     )
     view = DashboardView(snapshot, conversation_preview=conversation_preview)
     context_loader = ConversationPreviewLoader(refresh_seconds=1.0)
+    progress_manager = ProgressProbeManager(max_workers=3)
     quit_requested = False
     signal_state: dict[str, int | bool] = {"terminate": 0, "suspend": False}
 
@@ -2245,6 +2684,14 @@ def run_dashboard(
                             last_load = now
                             force_refresh = False
                             data_changed = True
+                        for result in progress_manager.poll():
+                            view.finish_progress(result)
+                            data_changed = True
+                            if result.error and (
+                                not result.bulk
+                                or result.session_key == view.selected_key
+                            ):
+                                view.set_flash(result.error, seconds=5.0)
                         if (
                             visible
                             and console.width >= 100
@@ -2312,6 +2759,41 @@ def run_dashboard(
                                 break
                         if action == "refresh":
                             force_refresh = True
+                        if action == "progress":
+                            progress_row = view.selected
+                            unavailable = progress_probe_availability(progress_row)
+                            if unavailable:
+                                view.set_flash(unavailable, seconds=5.0)
+                            elif progress_row is not None:
+                                session_key = str(
+                                    progress_row.get("session_key") or ""
+                                )
+                                if view.begin_progress(session_key):
+                                    progress_manager.submit(progress_row)
+                                else:
+                                    view.set_flash(
+                                        "A progress query is already running"
+                                    )
+                        if action == "progress_all":
+                            submitted = 0
+                            for progress_row in visible_sessions(view.snapshot):
+                                if progress_probe_availability(progress_row):
+                                    continue
+                                session_key = str(
+                                    progress_row.get("session_key") or ""
+                                )
+                                if view.begin_progress(session_key):
+                                    progress_manager.submit(progress_row, bulk=True)
+                                    submitted += 1
+                            if submitted:
+                                view.set_flash(
+                                    f"Asking {submitted} running session"
+                                    f"{'s' if submitted != 1 else ''} via /btw"
+                                )
+                            else:
+                                view.set_flash(
+                                    "No eligible running sessions to query"
+                                )
             if signal_state["terminate"]:
                 break
             if signal_state["suspend"]:
@@ -2334,6 +2816,7 @@ def run_dashboard(
         signum = int(signal_state["terminate"] or 0)
         return 128 + signum if signum else 0
     finally:
+        progress_manager.close()
         for signum, previous in previous_handlers.items():
             signal.signal(signum, previous)
 

@@ -30,6 +30,10 @@ experimental.
   and an online SQLite snapshot to a private operator-selected directory, then
   restores only missing data in a fresh container. Authentication and settings
   are excluded, and no installation path is embedded in the public repository.
+- On-demand global progress snapshots for running Codex and Claude Code sessions
+  through their shared `/btw` side-question command. The dashboard provides
+  selected (`b`) and bounded-concurrency bulk (`B`) actions, validates hidden
+  tmux panes before sending input, and keeps summaries in UI memory only.
 
 ### Changed
 

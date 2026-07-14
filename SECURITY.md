@@ -45,6 +45,12 @@ session/transcript files, and hook payloads. It writes local state under
 `~/.local/state/agent-watch/` and changes Codex/Claude hook configuration only
 when `install-hooks` or `uninstall-hooks` is explicitly run.
 
+The dashboard is passive by default. Pressing `b` or `B` explicitly authorizes a
+fixed `/btw` progress question to one or more running agent panes. Before sending
+keys, Agent Watch verifies the pane identity, rejects tmux copy mode, and refuses
+a pane that is currently active in any tmux client. Returned summaries remain in
+dashboard memory only.
+
 Relevant implementation safeguards include parameterized SQLite queries,
 argument-vector subprocess execution, terminal-control sanitization, bounded
 transcript reads, owner/path checks for preview files, no-follow HTTP redirect
@@ -70,6 +76,8 @@ they do not make untrusted same-user data safe in every environment.
   prompt text in Cursor notifications is acceptable for that workspace.
 - Do not expose the SQLite database, daemon socket namespace, or dashboard to
   other users.
+- Treat `b` and especially bulk `B` as active model requests. Do not use them on
+  sessions whose context should not be summarized on the monitoring terminal.
 - Keep Codex CLI and Claude Code versions within the tested matrix, and verify
   detection after upgrades because their internal formats can change.
 

@@ -38,6 +38,13 @@ cached only in dashboard process memory. It is not written to SQLite. The previe
 is designed to omit reasoning, system instructions, tool arguments, and tool
 outputs, but this is not a formal data-loss-prevention boundary.
 
+When the operator presses `b` or `B`, the dashboard sends a bounded `/btw`
+progress question to the selected running Codex/Claude tmux pane. The provider
+answer is captured from its temporary overlay and cached only in dashboard
+process memory. It is not added to the main provider transcript, written to
+SQLite, or included in notifications. This action invokes the configured model
+and may consume provider usage.
+
 Optional ephemeral-container persistence is disabled by default. When enabled,
 it copies `~/.codex/sessions`, `~/.claude/projects`, and a consistent Agent Watch
 SQLite snapshot to the operator-selected filesystem directory. The backup does
@@ -111,6 +118,9 @@ authentication or a private server for sensitive work.
 - Keep `ui.conversation_preview = false` (the default) when selected text must not
   appear on screen. The `p` key enables it only for the current UI process; avoid
   terminal recording and shared scrollback for sensitive sessions.
+- Use `b`/`B` only when sending the fixed progress question to those sessions and
+  displaying the returned summary is acceptable. Agent Watch refuses to type
+  into non-running panes or panes currently active in another tmux client.
 - `agent-watch status --json` is redacted by default. Treat `--full`, database
   rows, logs, screenshots, and bug reports as sensitive.
 - Review configured notification endpoints and their credentials regularly.
