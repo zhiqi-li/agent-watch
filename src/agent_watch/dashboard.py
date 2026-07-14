@@ -2158,6 +2158,52 @@ def _capture_progress_pane(
     )
 
 
+def _progress_side_ui_visible(text: str, marker: str, provider: str) -> bool:
+    """Recognize the provider's temporary side-answer surface."""
+    plain = ANSI_RE.sub("", text)
+    lower = plain.casefold()
+    if marker in plain:
+        return True
+    if provider == "codex":
+        return "side" in lower and "ctrl+c" in lower and "exit" in lower
+    if provider == "claude":
+        return "space" in lower and "dismiss" in lower
+    return False
+
+
+def _dismiss_progress_side_ui(
+    base: Sequence[str], pane_id: str, marker: str, provider: str
+) -> bool:
+    """Dismiss a side answer, retrying only while that surface is still visible."""
+    dismiss_key = "C-c" if provider == "codex" else "Space"
+    for _attempt in range(3):
+        # The final answer can be captured one frame before the side UI starts
+        # accepting navigation keys. Give it a short render cycle first.
+        time.sleep(0.15)
+        dismissed = subprocess.run(
+            list(base) + ["send-keys", "-t", pane_id, dismiss_key],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        if dismissed.returncode != 0:
+            return False
+        time.sleep(0.15)
+        capture = subprocess.run(
+            list(base) + ["capture-pane", "-p", "-J", "-t", pane_id],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        if capture.returncode != 0:
+            return False
+        if not _progress_side_ui_visible(capture.stdout, marker, provider):
+            return True
+    return False
+
+
 def _provider_composer_state_at_start(
     base: Sequence[str], pane_id: str, provider: str
 ) -> str:
@@ -2458,19 +2504,11 @@ def probe_session_progress(
                 )
             summary = parse_progress_capture(capture.stdout, marker, provider)
             if summary is not None:
-                # Current Codex uses a persistent side thread and documents
-                # Ctrl+C to return to the main thread. Claude uses Space to
-                # dismiss its temporary answer. The marker proves the answer is
-                # present before either provider-specific key is sent.
-                dismiss_key = "C-c" if provider == "codex" else "Space"
+                # The marker proves the answer is present before any
+                # provider-specific dismissal key is sent. Verify the side UI
+                # disappeared and retry only while it remains visible.
                 with contextlib.suppress(OSError, subprocess.SubprocessError):
-                    subprocess.run(
-                        base + ["send-keys", "-t", pane_id, dismiss_key],
-                        capture_output=True,
-                        text=True,
-                        timeout=2,
-                        check=False,
-                    )
+                    _dismiss_progress_side_ui(base, pane_id, marker, provider)
                 return ProgressProbeResult(
                     session_key=session_key, summary=summary
                 )

@@ -290,6 +290,7 @@ class DashboardTests(unittest.TestCase):
                     stderr="",
                 ),
                 completed([], 0, stdout="", stderr=""),
+                completed([], 0, stdout="main conversation\n", stderr=""),
             ]
             with (
                 self.subTest(provider=provider),
@@ -314,7 +315,38 @@ class DashboardTests(unittest.TestCase):
             submit_command = run.call_args_list[7].args[0]
             self.assertEqual(submit_command[-1], "Enter")
             expected_dismiss = "C-c" if provider == "codex" else "Space"
-            self.assertEqual(run.call_args_list[-1].args[0][-1], expected_dismiss)
+            dismiss_calls = [
+                call
+                for call in run.call_args_list
+                if call.args[0][-1] == expected_dismiss
+            ]
+            self.assertEqual(len(dismiss_calls), 1)
+
+    def test_codex_side_dismissal_retries_only_while_side_remains_visible(self):
+        completed = subprocess.CompletedProcess
+        marker = "AWP0123456789AB"
+        results = [
+            completed([], 0, stdout="", stderr=""),
+            completed(
+                [],
+                0,
+                stdout=f"side · Ctrl+C to exit\n{marker}|goal|done|now|next|none|END\n",
+                stderr="",
+            ),
+            completed([], 0, stdout="", stderr=""),
+            completed([], 0, stdout="main conversation\n", stderr=""),
+        ]
+        with (
+            mock.patch.object(ui.time, "sleep"),
+            mock.patch.object(ui.subprocess, "run", side_effect=results) as run,
+        ):
+            self.assertTrue(
+                ui._dismiss_progress_side_ui(["tmux"], "%1", marker, "codex")
+            )
+        dismiss_calls = [
+            call for call in run.call_args_list if call.args[0][-1] == "C-c"
+        ]
+        self.assertEqual(len(dismiss_calls), 2)
 
     def test_progress_probe_clears_verified_draft_when_submit_fails(self):
         completed = subprocess.CompletedProcess
