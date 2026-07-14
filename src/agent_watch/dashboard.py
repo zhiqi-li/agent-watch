@@ -2167,9 +2167,13 @@ def _progress_side_exit_hint_visible(
     if marker not in plain:
         return False
     if provider == "codex":
-        return "side" in lower and "ctrl+c" in lower and "exit" in lower
+        return (
+            "side" in lower
+            and "ctrl+c" in lower
+            and ("exit" in lower or "return" in lower)
+        )
     if provider == "claude":
-        return "space" in lower and "dismiss" in lower
+        return "space" in lower and ("dismiss" in lower or "return" in lower)
     return False
 
 

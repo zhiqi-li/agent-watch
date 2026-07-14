@@ -293,7 +293,7 @@ class DashboardTests(unittest.TestCase):
                     [],
                     0,
                     stdout=(
-                        f"side · Ctrl+C to exit\n{marker}\n"
+                        f"Side from main thread · Ctrl+C to return\n{marker}\n"
                         if provider == "codex"
                         else f"Press Space to dismiss\n{marker}\n"
                     ),
@@ -339,7 +339,10 @@ class DashboardTests(unittest.TestCase):
             completed(
                 [],
                 0,
-                stdout=f"side · Ctrl+C to exit\n{marker}|goal|done|now|next|none|END\n",
+                stdout=(
+                    "Side from main thread · main finished · Ctrl+C to return\n"
+                    f"{marker}|goal|done|now|next|none|END\n"
+                ),
                 stderr="",
             ),
             completed([], 0, stdout="", stderr=""),
