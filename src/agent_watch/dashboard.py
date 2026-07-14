@@ -1788,8 +1788,8 @@ def render_help(width: int) -> RenderableType:
         ("tmux prefix + L", "Return to Agent Watch after opening a session"),
         ("/", "Search projects, paths, or sessions"),
         ("f", "Cycle Current / Attention / Running"),
-        ("b", "Ask selected running session for global progress"),
-        ("B", "Ask all running Codex / Claude sessions"),
+        ("b", "Ask selected eligible session for global progress"),
+        ("B", "Ask all eligible Codex / Claude sessions"),
         ("p", "Show / hide local session preview"),
         ("r", "Refresh now"),
         ("g / G", "Jump to first / last"),
@@ -2106,8 +2106,11 @@ def progress_probe_availability(row: Mapping[str, Any] | None) -> str:
     provider = str(row.get("provider") or "")
     if provider not in {"codex", "claude"}:
         return "Only Codex and Claude sessions support /btw progress snapshots"
-    if str(row.get("state") or "") != "running":
-        return "A /btw progress snapshot is available only while the session is running"
+    if str(row.get("state") or "") not in {"running", "auto_wait", "ready"}:
+        return (
+            "A /btw progress snapshot is available only for running, auto-wait, "
+            "or ready sessions"
+        )
     pane_id = _command_value(row.get("pane_id") or "", 80)
     target = _command_value(row.get("tmux_target") or "", 200)
     if not pane_id.startswith("%") or not target:
@@ -2153,6 +2156,58 @@ def _capture_progress_pane(
         timeout=2,
         check=False,
     )
+
+
+def _ready_composer_is_empty(
+    base: Sequence[str], pane_id: str, provider: str
+) -> bool:
+    """Verify the provider's ready-state composer is visibly empty.
+
+    This check deliberately fails closed. A cursor at the prompt's first input
+    column is not enough because a user can move Home in a non-empty draft.
+    Codex distinguishes its empty placeholder with dim ANSI styling; Claude's
+    empty prompt line contains only its prompt glyph and whitespace.
+    """
+    cursor = subprocess.run(
+        list(base)
+        + [
+            "display-message",
+            "-p",
+            "-t",
+            pane_id,
+            "#{cursor_x}|#{cursor_y}",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=2,
+        check=False,
+    )
+    try:
+        cursor_x, cursor_y = (
+            int(value) for value in cursor.stdout.strip().split("|", 1)
+        )
+    except (AttributeError, TypeError, ValueError):
+        return False
+    if cursor.returncode != 0 or cursor_x != 2 or cursor_y < 0:
+        return False
+
+    capture = subprocess.run(
+        list(base) + ["capture-pane", "-e", "-p", "-t", pane_id],
+        capture_output=True,
+        text=True,
+        timeout=2,
+        check=False,
+    )
+    lines = capture.stdout.splitlines() if capture.returncode == 0 else []
+    if cursor_y >= len(lines):
+        return False
+    line = lines[cursor_y]
+    plain = ANSI_RE.sub("", line).replace("\u00a0", " ")
+    if provider == "codex":
+        return plain.startswith("› ") and "\x1b[2m" in line
+    if provider == "claude":
+        return plain.strip() == "❯"
+    return False
 
 
 def _progress_prompt_is_draft(capture: str, prompt: str) -> bool:
@@ -2249,12 +2304,13 @@ def parse_progress_capture(
 def probe_session_progress(
     row: Mapping[str, Any], timeout: float = 30.0, poll_seconds: float = 0.25
 ) -> ProgressProbeResult:
-    """Ask a hidden running Codex/Claude pane for a temporary progress summary.
+    """Ask an eligible hidden Codex/Claude pane for a progress summary.
 
-    The query is deliberately limited to running panes. It validates the saved
-    pane identity and refuses to type into a pane currently active in any tmux
-    client. The provider answer is captured from its temporary side UI and is
-    never written to the monitor database or provider transcript.
+    Running and auto-wait panes are eligible. Ready panes additionally require
+    a verified empty provider composer. The saved pane identity is validated,
+    and panes currently active in any tmux client are refused. The provider
+    answer is captured from its temporary side UI and is never retained in the
+    monitor database or provider transcript.
     """
     session_key = str(row.get("session_key") or "")
     provider = str(row.get("provider") or "")
@@ -2309,6 +2365,14 @@ def probe_session_progress(
             return ProgressProbeResult(
                 session_key=session_key,
                 error="The target pane is active in another client; switch back to Agent Watch first",
+            )
+
+        if str(row.get("state") or "") == "ready" and not _ready_composer_is_empty(
+            base, pane_id, provider
+        ):
+            return ProgressProbeResult(
+                session_key=session_key,
+                error="The ready session's provider composer is not verifiably empty",
             )
 
         marker = "AWP" + secrets.token_hex(6).upper()
@@ -2867,12 +2931,12 @@ def run_dashboard(
                                     submitted += 1
                             if submitted:
                                 view.set_flash(
-                                    f"Asking {submitted} running session"
+                                    f"Asking {submitted} eligible session"
                                     f"{'s' if submitted != 1 else ''} via /btw"
                                 )
                             else:
                                 view.set_flash(
-                                    "No eligible running sessions to query"
+                                    "No eligible sessions to query"
                                 )
             if signal_state["terminate"]:
                 break

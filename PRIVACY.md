@@ -39,10 +39,11 @@ is designed to omit reasoning, system instructions, tool arguments, and tool
 outputs, but this is not a formal data-loss-prevention boundary.
 
 When the operator presses `b` or `B`, the dashboard sends a bounded `/btw`
-progress question to the selected running Codex/Claude tmux pane. The provider
-answer is captured from its temporary side UI and cached only in dashboard
-process memory. It is not added to the main provider transcript, written to
-SQLite, or included in notifications. This action invokes the configured model
+progress question to selected eligible Codex/Claude tmux panes. Ready panes are
+queried only when their provider composer is verified empty. The provider answer
+is captured from its temporary side UI and cached only in dashboard process
+memory. Internal Codex side-thread hook records are discarded rather than retained
+in SQLite or included in notifications. This action invokes the configured model
 and may consume provider usage.
 
 Optional ephemeral-container persistence is disabled by default. When enabled,

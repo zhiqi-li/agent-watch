@@ -707,6 +707,95 @@ class AgentWatchTests(unittest.TestCase):
             self.assertEqual(row["event_id"], "cron")
             db.close()
 
+    def test_internal_progress_hook_discards_codex_side_session_family(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = aw.StateDB(pathlib.Path(tmp))
+            side = aw.Observation(
+                key="codex:side-session",
+                provider="codex",
+                session_id="side-session",
+                pid=None,
+                proc_start="",
+                pane_id="%1",
+                tmux_target="1:0.0",
+                cwd="/repo",
+                name="repo",
+                state="running",
+                event_id="hook:turn_started:side",
+                source="codex-hook",
+                raw_status="turn_started",
+            )
+            attention = aw.dataclasses.replace(
+                side,
+                key="codex:side-session:attention:test",
+                state="needs_input",
+                event_id="hook:permission_request:test",
+                raw_status="PermissionRequest",
+            )
+            db.upsert(side)
+            db.upsert(attention)
+            db.enqueue_session_now(attention.key)
+            reply = aw.dataclasses.replace(
+                side,
+                state="ready",
+                event_id="hook:stop:reply",
+                raw_status="Stop",
+                message=(
+                    "AWP0123456789AB|ship feature|parser done|render UI|"
+                    "run tests|none|END"
+                ),
+            )
+            aw.apply_hook_observation(db, reply)
+            self.assertEqual(db.sessions(), [])
+            self.assertEqual(
+                db.conn.execute("SELECT COUNT(*) FROM outbox").fetchone()[0], 0
+            )
+            db.close()
+
+    def test_internal_progress_purge_removes_only_exact_codex_probe_replies(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = aw.StateDB(pathlib.Path(tmp))
+            base = aw.Observation(
+                key="codex:old-side",
+                provider="codex",
+                session_id="old-side",
+                pid=None,
+                proc_start="",
+                pane_id="%1",
+                tmux_target="1:0.0",
+                cwd="/repo",
+                name="repo",
+                state="ready",
+                event_id="hook:stop:old",
+                source="codex-hook",
+                raw_status="Stop",
+                message=(
+                    "AWPABCDEF012345|goal|done|current|next|none|END"
+                ),
+            )
+            normal = aw.dataclasses.replace(
+                base,
+                key="codex:normal",
+                session_id="normal",
+                message="AWPABCDEF012345 is ordinary user-visible text",
+            )
+            claude = aw.dataclasses.replace(
+                base,
+                key="claude:same-shape",
+                provider="claude",
+                session_id="same-shape",
+                source="claude-hook",
+            )
+            db.upsert(base)
+            db.upsert(normal)
+            db.upsert(claude)
+            self.assertEqual(db.purge_internal_progress_sessions(), 1)
+            self.assertEqual(
+                {row["session_key"] for row in db.sessions()},
+                {"codex:normal", "claude:same-shape"},
+            )
+            db.close()
+
     def test_canonical_session_removes_pid_alias(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = aw.StateDB(pathlib.Path(tmp))

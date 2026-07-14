@@ -541,6 +541,41 @@ class StateDB:
         self._secure_files()
         return counts
 
+    def discard_session_family(self, provider: str, session_id: str) -> int:
+        """Discard an internal session and cancel any undelivered notifications."""
+        rows = self.conn.execute(
+            "SELECT session_key FROM sessions WHERE provider=? AND session_id=?",
+            (provider, session_id),
+        ).fetchall()
+        keys = [str(row["session_key"]) for row in rows]
+        if not keys:
+            return 0
+        placeholders = ",".join("?" for _ in keys)
+        self.conn.execute(
+            f"DELETE FROM outbox WHERE sent_at IS NULL AND session_key IN ({placeholders})",
+            keys,
+        )
+        self.conn.execute(
+            f"DELETE FROM sessions WHERE session_key IN ({placeholders})", keys
+        )
+        self.conn.commit()
+        self._secure_files()
+        return len(keys)
+
+    def purge_internal_progress_sessions(self) -> int:
+        """Remove Codex side threads created by Agent Watch progress probes."""
+        rows = self.conn.execute(
+            """SELECT provider, session_id, message FROM sessions
+               WHERE provider='codex' AND source='codex-hook'
+                 AND message LIKE 'AWP%|END'"""
+        ).fetchall()
+        families = {
+            (str(row["provider"]), str(row["session_id"]))
+            for row in rows
+            if is_internal_progress_reply(str(row["message"]))
+        }
+        return sum(self.discard_session_family(*family) for family in families)
+
     def set_meta(self, key: str, value: str) -> None:
         now = utc_now()
         self.conn.execute(
@@ -2583,11 +2618,43 @@ def is_user_prompt_observation(obs: Observation) -> bool:
     }
 
 
+INTERNAL_PROGRESS_REPLY_RE = re.compile(
+    r"^AWP[0-9A-F]{12}\|[^\r\n]*\|END$"
+)
+
+
+def is_internal_progress_reply(message: str) -> bool:
+    """Return whether a hook message is Agent Watch's marked /btw reply."""
+    return bool(INTERNAL_PROGRESS_REPLY_RE.fullmatch(message.strip()))
+
+
+def is_internal_progress_observation(obs: Observation) -> bool:
+    """Identify Codex's ephemeral side thread for an Agent Watch /btw probe."""
+    return (
+        obs.provider == "codex"
+        and obs.source == "codex-hook"
+        and obs.state == "ready"
+        and obs.raw_status.lower().replace("-", "_")
+        in {
+            "stop",
+            "agent_turn_complete",
+            "agent_turn_completed",
+            "task_complete",
+            "turn_complete",
+            "turn_completed",
+        }
+        and is_internal_progress_reply(obs.message)
+    )
+
+
 def apply_hook_observation(
     db: StateDB,
     obs: Observation,
     config: Mapping[str, Any] = DEFAULT_CONFIG,
 ) -> None:
+    if is_internal_progress_observation(obs):
+        db.discard_session_family(obs.provider, obs.session_id)
+        return
     raw = obs.raw_status.lower().replace("-", "_")
     if is_user_prompt_observation(obs):
         db.resolve_attention(
@@ -2681,6 +2748,7 @@ def run_daemon(args: argparse.Namespace, config: Mapping[str, Any]) -> int:
         print(str(exc), file=sys.stderr)
         db.close()
         return 1
+    db.purge_internal_progress_sessions()
     if args.once:
         exit_code = 0
         try:
