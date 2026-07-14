@@ -86,6 +86,9 @@ STATE_META: dict[str, tuple[str, str, str, int]] = {
 FILTERS = ("all", "attention", "running")
 FILTER_LABELS = {"all": "Current", "attention": "Attention", "running": "Running"}
 EXITED_SUMMARY_KEY = "__agent_watch_exited_sessions__"
+PROGRESS_REPLY_TIMEOUT_SECONDS = 90.0
+PROGRESS_LATE_CLEANUP_SECONDS = 300.0
+PROGRESS_LATE_CLEANUP_POLL_SECONDS = 0.5
 
 ANSI_RE = re.compile(
     r"(?:\x1B\][^\x07]*(?:\x07|\x1B\\)|\x1B\[[0-?]*[ -/]*[@-~]|\x1B[@-_])"
@@ -2209,6 +2212,44 @@ def _dismiss_progress_side_ui(
     return False
 
 
+def _watch_late_progress_side_cleanup(
+    base: Sequence[str],
+    pane_id: str,
+    marker: str,
+    provider: str,
+    timeout: float = PROGRESS_LATE_CLEANUP_SECONDS,
+    poll_seconds: float = PROGRESS_LATE_CLEANUP_POLL_SECONDS,
+) -> bool:
+    """Dismiss one late side answer after the foreground probe timed out."""
+    deadline = time.monotonic() + max(1.0, timeout)
+    while time.monotonic() < deadline:
+        try:
+            capture = _capture_progress_pane(base, pane_id)
+        except (OSError, subprocess.SubprocessError):
+            return False
+        if capture.returncode != 0:
+            return False
+        if _progress_side_exit_hint_visible(capture.stdout, marker, provider):
+            # Reuse the guarded one-shot path. It recaptures the pane before
+            # sending anything, so a user who already returned to main cannot
+            # be interrupted by this watcher.
+            return _dismiss_progress_side_ui(base, pane_id, marker, provider)
+        time.sleep(max(0.05, poll_seconds))
+    return False
+
+
+def _start_late_progress_side_cleanup(
+    base: Sequence[str], pane_id: str, marker: str, provider: str
+) -> None:
+    """Start a bounded daemon watcher for a response that missed its deadline."""
+    threading.Thread(
+        target=_watch_late_progress_side_cleanup,
+        args=(tuple(base), pane_id, marker, provider),
+        name="agent-watch-progress-cleanup",
+        daemon=True,
+    ).start()
+
+
 def _provider_composer_state_at_start(
     base: Sequence[str], pane_id: str, provider: str
 ) -> str:
@@ -2355,7 +2396,9 @@ def parse_progress_capture(
 
 
 def probe_session_progress(
-    row: Mapping[str, Any], timeout: float = 30.0, poll_seconds: float = 0.25
+    row: Mapping[str, Any],
+    timeout: float = PROGRESS_REPLY_TIMEOUT_SECONDS,
+    poll_seconds: float = 0.25,
 ) -> ProgressProbeResult:
     """Ask an eligible hidden Codex/Claude pane for a progress summary.
 
@@ -2524,6 +2567,12 @@ def probe_session_progress(
             error=sanitize(exc, 200) or "Unable to query session progress",
         )
     _clear_progress_prompt_draft(base, pane_id, prompt)
+    # A provider can finish after the foreground deadline, especially when a
+    # side request first compacts a long conversation. Keep cleanup separate
+    # from the result worker so bulk probes are not blocked for five minutes.
+    # The watcher can send only one key and only while this exact marker and the
+    # provider's side-return hint are both still visible.
+    _start_late_progress_side_cleanup(base, pane_id, marker, provider)
     return ProgressProbeResult(
         session_key=session_key,
         error="No /btw progress reply arrived before the timeout",

@@ -377,6 +377,99 @@ class DashboardTests(unittest.TestCase):
             any(call.args[0][-1] == "C-c" for call in run.call_args_list)
         )
 
+    def test_late_progress_cleanup_waits_for_hint_and_sends_only_once(self):
+        completed = subprocess.CompletedProcess
+        marker = "AWP0123456789AB"
+        results = [
+            completed([], 0, stdout=f"side loading\n{marker}\n", stderr=""),
+            completed(
+                [],
+                0,
+                stdout=f"Side from main thread · Ctrl+C to return\n{marker}\n",
+                stderr="",
+            ),
+            completed(
+                [],
+                0,
+                stdout=f"Side from main thread · Ctrl+C to return\n{marker}\n",
+                stderr="",
+            ),
+            completed([], 0, stdout="", stderr=""),
+        ]
+        with mock.patch.object(ui.subprocess, "run", side_effect=results) as run:
+            self.assertTrue(
+                ui._watch_late_progress_side_cleanup(
+                    ["tmux"], "%1", marker, "codex", timeout=1, poll_seconds=0.01
+                )
+            )
+        dismiss_calls = [
+            call for call in run.call_args_list if call.args[0][-1] == "C-c"
+        ]
+        self.assertEqual(len(dismiss_calls), 1)
+
+    def test_late_cleanup_never_uses_a_stale_side_hint_from_history(self):
+        completed = subprocess.CompletedProcess
+        marker = "AWP0123456789AB"
+        history = completed(
+            [],
+            0,
+            stdout=f"Side from main thread · Ctrl+C to return\n{marker}\n",
+            stderr="",
+        )
+        main = completed([], 0, stdout=f"main conversation\n{marker}\n", stderr="")
+        with (
+            mock.patch.object(ui.time, "sleep"),
+            mock.patch.object(
+                ui.subprocess, "run", side_effect=[history, main, main, main, main, main]
+            ) as run,
+        ):
+            self.assertFalse(
+                ui._watch_late_progress_side_cleanup(
+                    ["tmux"], "%1", marker, "codex", timeout=1
+                )
+            )
+        self.assertFalse(
+            any(call.args[0][-1] == "C-c" for call in run.call_args_list)
+        )
+
+    def test_progress_timeout_starts_bounded_late_cleanup(self):
+        completed = subprocess.CompletedProcess
+        marker = "AWP0123456789AB"
+        row = make_row("codex-progress", "running", "codex")
+        results = [
+            completed([], 0, stdout="1:0.0|0|0\n", stderr=""),
+            completed([], 0, stdout="", stderr=""),
+            completed([], 0, stdout="", stderr=""),
+            completed([], 0, stdout="", stderr=""),
+        ]
+        rendered = completed([], 0, stdout=f"› prompt {marker}\n", stderr="")
+        with (
+            mock.patch.object(ui.secrets, "token_hex", return_value="0123456789ab"),
+            mock.patch.object(ui.time, "monotonic", side_effect=[0, 0, 0.1, 2]),
+            mock.patch.object(ui.subprocess, "run", side_effect=results),
+            mock.patch.object(ui, "_capture_progress_pane", return_value=rendered),
+            mock.patch.object(ui, "_clear_progress_prompt_draft"),
+            mock.patch.object(ui, "_start_late_progress_side_cleanup") as cleanup,
+        ):
+            result = ui.probe_session_progress(row, timeout=1, poll_seconds=0.01)
+        self.assertIn("before the timeout", result.error)
+        cleanup.assert_called_once_with(
+            ["tmux", "-S", "/tmp/tmux-0/default"], "%1", marker, "codex"
+        )
+
+    def test_late_progress_cleanup_thread_is_bounded_daemon(self):
+        with mock.patch.object(ui.threading, "Thread") as thread:
+            ui._start_late_progress_side_cleanup(
+                ["tmux"], "%1", "AWP0123456789AB", "codex"
+            )
+        thread.assert_called_once_with(
+            target=ui._watch_late_progress_side_cleanup,
+            args=(("tmux",), "%1", "AWP0123456789AB", "codex"),
+            name="agent-watch-progress-cleanup",
+            daemon=True,
+        )
+        thread.return_value.start.assert_called_once_with()
+
     def test_progress_probe_clears_verified_draft_when_submit_fails(self):
         completed = subprocess.CompletedProcess
         marker = "AWP0123456789AB"

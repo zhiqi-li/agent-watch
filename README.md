@@ -365,6 +365,11 @@ is submitted as part of the temporary question. Needs-input and error sessions
 remain blocked. Agent Watch also validates the saved pane identity and sends the
 same temporary `/btw` prompt to both providers.
 
+Agent Watch waits up to 90 seconds for the snapshot. If a provider finishes
+later (for example, after compacting a long conversation), a bounded background
+watcher keeps checking for that exact side answer for five minutes and safely
+dismisses it once its provider-specific return hint appears.
+
 ## Privacy defaults
 
 Agent Watch reads current-user process metadata, bounded tmux pane text, and
