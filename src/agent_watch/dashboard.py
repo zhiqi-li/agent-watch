@@ -2158,10 +2158,10 @@ def _capture_progress_pane(
     )
 
 
-def _ready_composer_is_empty(
+def _provider_composer_is_empty(
     base: Sequence[str], pane_id: str, provider: str
 ) -> bool:
-    """Verify the provider's ready-state composer is visibly empty.
+    """Verify the provider's composer is visibly empty.
 
     This check deliberately fails closed. A cursor at the prompt's first input
     column is not enough because a user can move Home in a non-empty draft.
@@ -2306,11 +2306,11 @@ def probe_session_progress(
 ) -> ProgressProbeResult:
     """Ask an eligible hidden Codex/Claude pane for a progress summary.
 
-    Running and auto-wait panes are eligible. Ready panes additionally require
-    a verified empty provider composer. The saved pane identity is validated,
-    and panes currently active in any tmux client are refused. The provider
-    answer is captured from its temporary side UI and is never retained in the
-    monitor database or provider transcript.
+    Running and auto-wait panes are eligible. Ready panes and panes currently
+    active in a tmux client additionally require a verified empty provider
+    composer. The saved pane identity is validated. The provider answer is
+    captured from its temporary side UI and is never retained in the monitor
+    database or provider transcript.
     """
     session_key = str(row.get("session_key") or "")
     provider = str(row.get("provider") or "")
@@ -2361,18 +2361,15 @@ def probe_session_progress(
                 session_key=session_key,
                 error="Unable to verify whether the target pane is being viewed",
             )
-        if pane_id in {line.strip() for line in clients.stdout.splitlines()}:
-            return ProgressProbeResult(
-                session_key=session_key,
-                error="The target pane is active in another client; switch back to Agent Watch first",
-            )
-
-        if str(row.get("state") or "") == "ready" and not _ready_composer_is_empty(
+        active = pane_id in {line.strip() for line in clients.stdout.splitlines()}
+        state = str(row.get("state") or "")
+        if (active or state == "ready") and not _provider_composer_is_empty(
             base, pane_id, provider
         ):
+            subject = "active pane" if active else "ready session"
             return ProgressProbeResult(
                 session_key=session_key,
-                error="The ready session's provider composer is not verifiably empty",
+                error=f"The {subject}'s provider composer is not verifiably empty",
             )
 
         marker = "AWP" + secrets.token_hex(6).upper()

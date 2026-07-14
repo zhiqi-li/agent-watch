@@ -361,8 +361,9 @@ global progress snapshot, or `B` to query all eligible sessions with at most
 three concurrent requests. Running and auto-wait sessions are eligible; ready
 sessions are queried only after Agent Watch verifies that the provider composer
 is empty. Needs-input and error sessions remain blocked. Agent Watch also
-validates the saved pane identity, refuses panes currently active in another
-tmux client, and sends the same temporary `/btw` prompt to both providers.
+validates the saved pane identity and sends the same temporary `/btw` prompt to
+both providers. A pane may be queried while active in another tmux client, but
+only after the same empty-composer check passes.
 
 ## Privacy defaults
 

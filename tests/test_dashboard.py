@@ -259,9 +259,16 @@ class DashboardTests(unittest.TestCase):
         marker = "AWP0123456789AB"
         for provider in ("codex", "claude"):
             row = make_row(f"{provider}-progress", "running", provider, provider)
+            composer = (
+                "\x1b[1m›\x1b[0m \x1b[2mImprove documentation\x1b[0m"
+                if provider == "codex"
+                else "\x1b[39m❯\u00a0"
+            )
             results = [
                 completed([], 0, stdout="1:0.0|0|0\n", stderr=""),
-                completed([], 0, stdout="%dashboard\n", stderr=""),
+                completed([], 0, stdout="%1\n", stderr=""),
+                completed([], 0, stdout="2|1\n", stderr=""),
+                completed([], 0, stdout=f"header\n{composer}\n", stderr=""),
                 completed([], 0, stdout="", stderr=""),
                 completed(
                     [],
@@ -291,13 +298,13 @@ class DashboardTests(unittest.TestCase):
             assert result.summary is not None
             self.assertEqual(result.summary.provider, provider)
             self.assertEqual(result.summary.current, "render UI")
-            send_command = run.call_args_list[2].args[0]
+            send_command = run.call_args_list[4].args[0]
             self.assertIn("send-keys", send_command)
             prompt = send_command[send_command.index("-l") + 1]
             self.assertTrue(prompt.startswith("/btw "))
             self.assertIn(marker, prompt)
             self.assertNotIn(";", send_command)
-            submit_command = run.call_args_list[4].args[0]
+            submit_command = run.call_args_list[6].args[0]
             self.assertEqual(submit_command[-1], "Enter")
             expected_dismiss = "C-c" if provider == "codex" else "Space"
             self.assertEqual(run.call_args_list[-1].args[0][-1], expected_dismiss)
@@ -339,17 +346,20 @@ class DashboardTests(unittest.TestCase):
             cleanup_command[cleanup_command.index("-N") + 1], str(len(prompt))
         )
 
-    def test_progress_probe_refuses_pane_visible_in_another_client(self):
+    def test_progress_probe_refuses_active_pane_with_nonempty_draft(self):
         row = make_row("visible-progress", "running", "visible")
         completed = subprocess.CompletedProcess
         results = [
             completed([], 0, stdout="1:0.0|0|0\n", stderr=""),
             completed([], 0, stdout="%1\n", stderr=""),
+            completed([], 0, stdout="2|1\n", stderr=""),
+            completed([], 0, stdout="header\n\x1b[1m›\x1b[0m DRAFTMARK\n", stderr=""),
         ]
         with mock.patch.object(ui.subprocess, "run", side_effect=results) as run:
             result = ui.probe_session_progress(row, timeout=1)
-        self.assertIn("active in another client", result.error)
-        self.assertEqual(run.call_count, 2)
+        self.assertIn("active pane", result.error)
+        self.assertIn("not verifiably empty", result.error)
+        self.assertEqual(run.call_count, 4)
         self.assertFalse(
             any("send-keys" in call.args[0] for call in run.call_args_list)
         )
@@ -374,7 +384,7 @@ class DashboardTests(unittest.TestCase):
         unsupported = make_row("other", "running", "demo", "other")
         self.assertIn("Only Codex and Claude", ui.progress_probe_availability(unsupported))
 
-    def test_ready_composer_empty_check_distinguishes_placeholders_from_drafts(self):
+    def test_composer_empty_check_distinguishes_placeholders_from_drafts(self):
         completed = subprocess.CompletedProcess
         cases = (
             (
@@ -395,7 +405,7 @@ class DashboardTests(unittest.TestCase):
                 ]
                 with mock.patch.object(ui.subprocess, "run", side_effect=results):
                     self.assertEqual(
-                        ui._ready_composer_is_empty(["tmux"], "%1", provider),
+                        ui._provider_composer_is_empty(["tmux"], "%1", provider),
                         expected,
                     )
 

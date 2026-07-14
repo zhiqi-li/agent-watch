@@ -49,9 +49,9 @@ The dashboard is passive by default. Pressing `b` or `B` explicitly authorizes a
 fixed `/btw` progress question to one or more eligible agent panes. Running and
 auto-wait panes are eligible; ready panes additionally require a provider-specific
 empty-composer check. Needs-input and error panes are blocked. Before sending keys,
-Agent Watch verifies the pane identity, rejects tmux copy mode, and refuses a pane
-that is currently active in any tmux client. Returned summaries remain in dashboard
-memory only.
+Agent Watch verifies the pane identity and rejects tmux copy mode. A pane that is
+active in another tmux client must also pass the empty-composer check. Returned
+summaries remain in dashboard memory only.
 
 Relevant implementation safeguards include parameterized SQLite queries,
 argument-vector subprocess execution, terminal-control sanitization, bounded
