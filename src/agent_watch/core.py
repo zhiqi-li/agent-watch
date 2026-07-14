@@ -1209,11 +1209,14 @@ def pane_shows_running(text: str, provider: str) -> bool:
 
 
 def pane_for_process(proc: ProcessInfo, panes: Sequence[Pane]) -> Pane | None:
-    if proc.tmux_pane:
+    # TMUX/TMUX_PANE survive daemonization and can outlive the process that
+    # originally occupied a pane.  Only trust that inherited location when the
+    # process is still connected to the pane's terminal.
+    if proc.tmux_pane and proc.tty:
         for pane in panes:
             if pane.pane_id == proc.tmux_pane and (
                 not proc.tmux_socket or pane.socket_path == proc.tmux_socket
-            ):
+            ) and pane.tty == proc.tty:
                 return pane
     if proc.tty:
         for pane in panes:

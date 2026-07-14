@@ -107,7 +107,23 @@ class ProcessDiscoveryTests(unittest.TestCase):
                 "terminal": None,
             }
         )
-        fake = FakePsutil([codex, other_user, zombie])
+        claude_daemon = FakeProcess(
+            {
+                "pid": 104,
+                "uids": FakeUIDs(current_uid),
+                "name": "claude",
+                "status": "running",
+                "create_time": created,
+                "cwd": "/private",
+                "terminal": None,
+                "cmdline": ["/usr/local/bin/claude", "daemon", "run"],
+            },
+            environment={
+                "TMUX": "/tmp/tmux-501/default,123,0",
+                "TMUX_PANE": "%7",
+            },
+        )
+        fake = FakePsutil([codex, other_user, zombie, claude_daemon])
 
         found = processes._darwin_agent_processes(fake)
 
@@ -157,6 +173,33 @@ class ProcessDiscoveryTests(unittest.TestCase):
             self.assertEqual(
                 processes._linux_open_process_files(123, proc_root), [rollout]
             )
+
+    def test_linux_backend_ignores_claude_daemon_with_inherited_tmux(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            proc_root = root / "proc"
+            process_root = proc_root / "456"
+            descriptors = process_root / "fd"
+            descriptors.mkdir(parents=True)
+            (process_root / "comm").write_text("claude\n")
+            fields = ["S", *("0" for _ in range(18)), "5151"]
+            (process_root / "stat").write_text(
+                f"456 (claude) {' '.join(fields)}\n"
+            )
+            (process_root / "cmdline").write_bytes(
+                b"/usr/local/bin/claude\0daemon\0run\0--origin\0transient\0"
+            )
+            (process_root / "environ").write_bytes(
+                b"TMUX=/tmp/tmux-100/default,1,0\0TMUX_PANE=%3\0"
+            )
+            cwd = root / "project"
+            cwd.mkdir()
+            (process_root / "cwd").symlink_to(cwd)
+            (descriptors / "0").symlink_to("/dev/null")
+
+            found = processes._linux_agent_processes(proc_root, uid=os.getuid())
+
+            self.assertEqual(found, [])
 
 
 if __name__ == "__main__":

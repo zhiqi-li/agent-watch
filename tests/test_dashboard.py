@@ -309,6 +309,46 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(extract.call_count, 1)
             self.assertEqual(path.stat().st_mtime_ns, before)
 
+    def test_git_context_is_cached_and_reports_branch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            completed = subprocess.CompletedProcess(
+                [], 0, stdout=f"{tmp}\nfeature/session-details\n", stderr=""
+            )
+            ui.GIT_CONTEXT_CACHE.clear()
+            with mock.patch.object(
+                ui.subprocess, "run", return_value=completed
+            ) as run:
+                first = ui.git_context(tmp, refresh_seconds=60)
+                second = ui.git_context(tmp, refresh_seconds=60)
+            self.assertEqual(first, (tmp, "feature/session-details"))
+            self.assertEqual(second, first)
+            self.assertEqual(run.call_count, 1)
+
+    @unittest.skipUnless(ui.RICH_AVAILABLE, "rich unavailable")
+    def test_session_detail_shows_path_branch_and_identity(self):
+        from rich.console import Console
+
+        row = make_row("session-identity", "running", "shared-name")
+        snapshot = ui.DashboardSnapshot(sessions=[row], daemon_alive=True)
+        output = io.StringIO()
+        console = Console(
+            file=output, width=64, height=32, force_terminal=False, color_system=None
+        )
+        with mock.patch.object(
+            ui,
+            "git_context",
+            return_value=("/work/shared-name", "feature/distinguish-tasks"),
+        ):
+            console.print(ui.render_detail(ui.DashboardView(snapshot), 64, 32))
+        rendered = output.getvalue()
+        self.assertIn("Path", rendered)
+        self.assertIn("/work/shared-name", rendered)
+        self.assertIn("Branch", rendered)
+        self.assertIn("feature/distinguish-tasks", rendered)
+        self.assertIn("Session", rendered)
+        self.assertIn("session-identity", rendered)
+        self.assertIn("PID 1", rendered)
+
     @unittest.skipUnless(ui.RICH_AVAILABLE, "rich unavailable")
     def test_context_preview_render_strips_terminal_controls(self):
         from rich.console import Console
