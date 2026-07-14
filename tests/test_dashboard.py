@@ -300,6 +300,7 @@ class DashboardTests(unittest.TestCase):
                     stderr="",
                 ),
                 completed([], 0, stdout="", stderr=""),
+                completed([], 0, stdout="main conversation\n", stderr=""),
             ]
             with (
                 self.subTest(provider=provider),
@@ -346,12 +347,86 @@ class DashboardTests(unittest.TestCase):
                 stderr="",
             ),
             completed([], 0, stdout="", stderr=""),
+            completed([], 0, stdout="main conversation\n", stderr=""),
         ]
         with (
             mock.patch.object(ui.time, "sleep"),
             mock.patch.object(ui.subprocess, "run", side_effect=results) as run,
         ):
             self.assertTrue(
+                ui._dismiss_progress_side_ui(["tmux"], "%1", marker, "codex")
+            )
+        dismiss_calls = [
+            call for call in run.call_args_list if call.args[0][-1] == "C-c"
+        ]
+        self.assertEqual(len(dismiss_calls), 1)
+
+    def test_codex_side_close_race_allows_one_verified_retry(self):
+        completed = subprocess.CompletedProcess
+        marker = "AWP0123456789AB"
+        hint = f"Side from main thread · Ctrl+C to return\n{marker}\n"
+        failure = (
+            "Failed to close side conversation abc; it is still open: "
+            "turn/interrupt failed: no active turn to interrupt\n" + hint
+        )
+        results = [
+            completed([], 0, stdout=hint, stderr=""),
+            completed([], 0, stdout="", stderr=""),
+            completed([], 0, stdout=failure, stderr=""),
+            completed([], 0, stdout=failure, stderr=""),
+            completed([], 0, stdout="", stderr=""),
+            completed([], 0, stdout="main conversation", stderr=""),
+        ]
+        with (
+            mock.patch.object(ui.time, "sleep"),
+            mock.patch.object(ui.subprocess, "run", side_effect=results) as run,
+        ):
+            self.assertTrue(
+                ui._dismiss_progress_side_ui(["tmux"], "%1", marker, "codex")
+            )
+        dismiss_calls = [
+            call for call in run.call_args_list if call.args[0][-1] == "C-c"
+        ]
+        self.assertEqual(len(dismiss_calls), 2)
+
+    def test_codex_side_close_race_revalidates_before_retry(self):
+        completed = subprocess.CompletedProcess
+        marker = "AWP0123456789AB"
+        hint = f"Side from main thread · Ctrl+C to return\n{marker}\n"
+        failure = (
+            "Failed to close side conversation abc; it is still open: "
+            "turn/interrupt failed: no active turn to interrupt\n" + hint
+        )
+        results = [
+            completed([], 0, stdout=hint, stderr=""),
+            completed([], 0, stdout="", stderr=""),
+            completed([], 0, stdout=failure, stderr=""),
+            completed([], 0, stdout=f"main conversation\n{marker}\n", stderr=""),
+        ]
+        with mock.patch.object(ui.subprocess, "run", side_effect=results) as run:
+            self.assertTrue(
+                ui._dismiss_progress_side_ui(["tmux"], "%1", marker, "codex")
+            )
+        dismiss_calls = [
+            call for call in run.call_args_list if call.args[0][-1] == "C-c"
+        ]
+        self.assertEqual(len(dismiss_calls), 1)
+
+    def test_side_that_stays_open_without_explicit_failure_is_not_retried(self):
+        completed = subprocess.CompletedProcess
+        marker = "AWP0123456789AB"
+        hint = f"Side from main thread · Ctrl+C to return\n{marker}\n"
+        results = [
+            completed([], 0, stdout=hint, stderr=""),
+            completed([], 0, stdout="", stderr=""),
+            completed([], 0, stdout=hint, stderr=""),
+        ]
+        with (
+            mock.patch.object(ui.time, "sleep"),
+            mock.patch.object(ui.time, "monotonic", side_effect=[0, 0.1, 2]),
+            mock.patch.object(ui.subprocess, "run", side_effect=results) as run,
+        ):
+            self.assertFalse(
                 ui._dismiss_progress_side_ui(["tmux"], "%1", marker, "codex")
             )
         dismiss_calls = [
@@ -395,6 +470,7 @@ class DashboardTests(unittest.TestCase):
                 stderr="",
             ),
             completed([], 0, stdout="", stderr=""),
+            completed([], 0, stdout="main conversation\n", stderr=""),
         ]
         with mock.patch.object(ui.subprocess, "run", side_effect=results) as run:
             self.assertTrue(

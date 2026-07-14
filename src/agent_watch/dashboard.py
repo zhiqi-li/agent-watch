@@ -89,6 +89,8 @@ EXITED_SUMMARY_KEY = "__agent_watch_exited_sessions__"
 PROGRESS_REPLY_TIMEOUT_SECONDS = 90.0
 PROGRESS_LATE_CLEANUP_SECONDS = 300.0
 PROGRESS_LATE_CLEANUP_POLL_SECONDS = 0.5
+PROGRESS_SIDE_CLOSE_TIMEOUT_SECONDS = 2.0
+PROGRESS_SIDE_CLOSE_POLL_SECONDS = 0.1
 
 ANSI_RE = re.compile(
     r"(?:\x1B\][^\x07]*(?:\x07|\x1B\\)|\x1B\[[0-?]*[ -/]*[@-~]|\x1B[@-_])"
@@ -2164,7 +2166,7 @@ def _capture_progress_pane(
 def _progress_side_exit_hint_visible(
     text: str, marker: str, provider: str
 ) -> bool:
-    """Recognize the exact provider hint that authorizes one dismissal key."""
+    """Recognize the exact provider hint required before a dismissal key."""
     plain = ANSI_RE.sub("", text)
     lower = plain.casefold()
     if marker not in plain:
@@ -2180,34 +2182,109 @@ def _progress_side_exit_hint_visible(
     return False
 
 
+def _codex_side_close_race_visible(text: str, marker: str) -> bool:
+    """Recognize Codex's explicit confirmation that a side close failed."""
+    if not _progress_side_exit_hint_visible(text, marker, "codex"):
+        return False
+    lower = ANSI_RE.sub("", text).casefold()
+    return (
+        "failed to close side conversation" in lower
+        and "it is still open" in lower
+        and "no active turn to interrupt" in lower
+    )
+
+
+def _capture_current_progress_pane(
+    base: Sequence[str], pane_id: str
+) -> subprocess.CompletedProcess[str]:
+    """Capture only the current screen so scrollback cannot authorize a key."""
+    return subprocess.run(
+        list(base) + ["capture-pane", "-p", "-J", "-t", pane_id],
+        capture_output=True,
+        text=True,
+        timeout=2,
+        check=False,
+    )
+
+
+def _wait_for_progress_side_close(
+    base: Sequence[str],
+    pane_id: str,
+    marker: str,
+    provider: str,
+    timeout: float = PROGRESS_SIDE_CLOSE_TIMEOUT_SECONDS,
+    poll_seconds: float = PROGRESS_SIDE_CLOSE_POLL_SECONDS,
+) -> str:
+    """Return ``closed``, ``codex-race``, or ``open`` after a dismissal key."""
+    deadline = time.monotonic() + max(0.1, timeout)
+    while time.monotonic() < deadline:
+        capture = _capture_current_progress_pane(base, pane_id)
+        if capture.returncode != 0:
+            return "open"
+        if not _progress_side_exit_hint_visible(capture.stdout, marker, provider):
+            return "closed"
+        if provider == "codex" and _codex_side_close_race_visible(
+            capture.stdout, marker
+        ):
+            return "codex-race"
+        time.sleep(max(0.05, poll_seconds))
+    return "open"
+
+
+def _send_progress_side_dismissal(
+    base: Sequence[str], pane_id: str, provider: str
+) -> bool:
+    dismiss_key = "C-c" if provider == "codex" else "Space"
+    dismissed = subprocess.run(
+        list(base) + ["send-keys", "-t", pane_id, dismiss_key],
+        capture_output=True,
+        text=True,
+        timeout=2,
+        check=False,
+    )
+    return dismissed.returncode == 0
+
+
 def _dismiss_progress_side_ui(
     base: Sequence[str], pane_id: str, marker: str, provider: str
 ) -> bool:
-    """Dismiss a side answer once, only after its exact exit hint is visible."""
-    dismiss_key = "C-c" if provider == "codex" else "Space"
+    """Dismiss a marked side answer and verify that the provider returned."""
     # The structured answer can arrive one frame before the side UI exposes its
-    # navigation hint. Wait briefly for that positive signal. A stale marker on
-    # the main screen is never enough to authorize Ctrl+C/Space.
+    # navigation hint. Wait briefly for that positive signal. Current-screen
+    # validation prevents a stale marker in scrollback from authorizing a key.
     for _attempt in range(5):
-        capture = subprocess.run(
-            list(base) + ["capture-pane", "-p", "-J", "-t", pane_id],
-            capture_output=True,
-            text=True,
-            timeout=2,
-            check=False,
-        )
+        capture = _capture_current_progress_pane(base, pane_id)
         if capture.returncode != 0:
             return False
         if _progress_side_exit_hint_visible(capture.stdout, marker, provider):
-            time.sleep(0.1)
-            dismissed = subprocess.run(
-                list(base) + ["send-keys", "-t", pane_id, dismiss_key],
-                capture_output=True,
-                text=True,
-                timeout=2,
-                check=False,
+            if not _send_progress_side_dismissal(base, pane_id, provider):
+                return False
+            result = _wait_for_progress_side_close(
+                base, pane_id, marker, provider
             )
-            return dismissed.returncode == 0
+            if result == "closed":
+                return True
+            if result != "codex-race":
+                return False
+
+            # Codex 0.144.x can reject the first Ctrl+C after a completed side
+            # answer because it tries to interrupt a turn that has just ended.
+            # Retry once only after the provider itself says the side remains
+            # open, then revalidate the exact marker and return hint immediately
+            # before sending. This is not a general dismissal retry.
+            retry_capture = _capture_current_progress_pane(base, pane_id)
+            if retry_capture.returncode != 0:
+                return False
+            if not _codex_side_close_race_visible(retry_capture.stdout, marker):
+                return not _progress_side_exit_hint_visible(
+                    retry_capture.stdout, marker, provider
+                )
+            if not _send_progress_side_dismissal(base, pane_id, provider):
+                return False
+            return (
+                _wait_for_progress_side_close(base, pane_id, marker, provider)
+                == "closed"
+            )
         time.sleep(0.1)
     return False
 
@@ -2230,9 +2307,8 @@ def _watch_late_progress_side_cleanup(
         if capture.returncode != 0:
             return False
         if _progress_side_exit_hint_visible(capture.stdout, marker, provider):
-            # Reuse the guarded one-shot path. It recaptures the pane before
-            # sending anything, so a user who already returned to main cannot
-            # be interrupted by this watcher.
+            # Reuse the guarded dismissal path. It recaptures the current screen
+            # before every key, so scrollback cannot authorize a retry.
             return _dismiss_progress_side_ui(base, pane_id, marker, provider)
         time.sleep(max(0.05, poll_seconds))
     return False
