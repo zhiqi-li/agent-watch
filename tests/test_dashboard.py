@@ -254,19 +254,30 @@ class DashboardTests(unittest.TestCase):
                 self.assertEqual(summary.next, "运行完整测试")
                 self.assertEqual(summary.blocker, "")
 
-    def test_progress_probe_supports_codex_and_claude_with_same_btw_protocol(self):
+    def test_progress_probe_supports_attached_drafts_with_same_btw_protocol(self):
         completed = subprocess.CompletedProcess
         marker = "AWP0123456789AB"
         for provider in ("codex", "claude"):
             row = make_row(f"{provider}-progress", "running", provider, provider)
+            composer = (
+                "\x1b[1m›\x1b[0m DRAFTMARK"
+                if provider == "codex"
+                else "\x1b[39m❯\u00a0DRAFTMARK"
+            )
             results = [
                 completed([], 0, stdout="1:0.0|0|0\n", stderr=""),
-                completed([], 0, stdout="%dashboard\n", stderr=""),
+                completed([], 0, stdout="%1\n", stderr=""),
+                completed([], 0, stdout="", stderr=""),
+                completed([], 0, stdout="2|1\n", stderr=""),
+                completed([], 0, stdout=f"header\n{composer}\n", stderr=""),
                 completed([], 0, stdout="", stderr=""),
                 completed(
                     [],
                     0,
-                    stdout=f"› {ui._progress_prompt(marker)}\n  tab to queue message\n",
+                    stdout=(
+                        f"› {ui._progress_prompt(marker)} DRAFTMARK\n"
+                        "  tab to queue message\n"
+                    ),
                     stderr="",
                 ),
                 completed([], 0, stdout="", stderr=""),
@@ -279,6 +290,7 @@ class DashboardTests(unittest.TestCase):
                     stderr="",
                 ),
                 completed([], 0, stdout="", stderr=""),
+                completed([], 0, stdout="main conversation\n", stderr=""),
             ]
             with (
                 self.subTest(provider=provider),
@@ -291,16 +303,50 @@ class DashboardTests(unittest.TestCase):
             assert result.summary is not None
             self.assertEqual(result.summary.provider, provider)
             self.assertEqual(result.summary.current, "render UI")
-            send_command = run.call_args_list[2].args[0]
+            position_command = run.call_args_list[2].args[0]
+            self.assertEqual(position_command[-1], "Home")
+            send_command = run.call_args_list[5].args[0]
             self.assertIn("send-keys", send_command)
             prompt = send_command[send_command.index("-l") + 1]
             self.assertTrue(prompt.startswith("/btw "))
+            self.assertTrue(prompt.endswith(" "))
             self.assertIn(marker, prompt)
             self.assertNotIn(";", send_command)
-            submit_command = run.call_args_list[4].args[0]
+            submit_command = run.call_args_list[7].args[0]
             self.assertEqual(submit_command[-1], "Enter")
             expected_dismiss = "C-c" if provider == "codex" else "Space"
-            self.assertEqual(run.call_args_list[-1].args[0][-1], expected_dismiss)
+            dismiss_calls = [
+                call
+                for call in run.call_args_list
+                if call.args[0][-1] == expected_dismiss
+            ]
+            self.assertEqual(len(dismiss_calls), 1)
+
+    def test_codex_side_dismissal_retries_only_while_side_remains_visible(self):
+        completed = subprocess.CompletedProcess
+        marker = "AWP0123456789AB"
+        results = [
+            completed([], 0, stdout="", stderr=""),
+            completed(
+                [],
+                0,
+                stdout=f"side · Ctrl+C to exit\n{marker}|goal|done|now|next|none|END\n",
+                stderr="",
+            ),
+            completed([], 0, stdout="", stderr=""),
+            completed([], 0, stdout="main conversation\n", stderr=""),
+        ]
+        with (
+            mock.patch.object(ui.time, "sleep"),
+            mock.patch.object(ui.subprocess, "run", side_effect=results) as run,
+        ):
+            self.assertTrue(
+                ui._dismiss_progress_side_ui(["tmux"], "%1", marker, "codex")
+            )
+        dismiss_calls = [
+            call for call in run.call_args_list if call.args[0][-1] == "C-c"
+        ]
+        self.assertEqual(len(dismiss_calls), 2)
 
     def test_progress_probe_clears_verified_draft_when_submit_fails(self):
         completed = subprocess.CompletedProcess
@@ -339,19 +385,22 @@ class DashboardTests(unittest.TestCase):
             cleanup_command[cleanup_command.index("-N") + 1], str(len(prompt))
         )
 
-    def test_progress_probe_refuses_pane_visible_in_another_client(self):
+    def test_progress_probe_refuses_active_pane_without_composer_start(self):
         row = make_row("visible-progress", "running", "visible")
         completed = subprocess.CompletedProcess
         results = [
             completed([], 0, stdout="1:0.0|0|0\n", stderr=""),
             completed([], 0, stdout="%1\n", stderr=""),
+            completed([], 0, stdout="", stderr=""),
+            completed([], 0, stdout="0|1\n", stderr=""),
         ]
         with mock.patch.object(ui.subprocess, "run", side_effect=results) as run:
             result = ui.probe_session_progress(row, timeout=1)
-        self.assertIn("active in another client", result.error)
-        self.assertEqual(run.call_count, 2)
+        self.assertIn("active pane", result.error)
+        self.assertIn("could not be positioned safely", result.error)
+        self.assertEqual(run.call_count, 4)
         self.assertFalse(
-            any("send-keys" in call.args[0] for call in run.call_args_list)
+            any("-l" in call.args[0] for call in run.call_args_list)
         )
 
     def test_progress_probe_allows_active_and_ready_supported_sessions(self):
@@ -374,18 +423,18 @@ class DashboardTests(unittest.TestCase):
         unsupported = make_row("other", "running", "demo", "other")
         self.assertIn("Only Codex and Claude", ui.progress_probe_availability(unsupported))
 
-    def test_ready_composer_empty_check_distinguishes_placeholders_from_drafts(self):
+    def test_composer_state_distinguishes_placeholders_from_drafts(self):
         completed = subprocess.CompletedProcess
         cases = (
             (
                 "codex-empty",
                 "codex",
                 "\x1b[1m›\x1b[0m \x1b[2mImprove documentation\x1b[0m",
-                True,
+                "empty",
             ),
-            ("codex-draft-at-home", "codex", "\x1b[1m›\x1b[0m DRAFTMARK", False),
-            ("claude-empty", "claude", "\x1b[39m❯\u00a0", True),
-            ("claude-draft-at-home", "claude", "\x1b[39m❯\u00a0DRAFTMARK", False),
+            ("codex-draft-at-home", "codex", "\x1b[1m›\x1b[0m DRAFTMARK", "draft"),
+            ("claude-empty", "claude", "\x1b[39m❯\u00a0", "empty"),
+            ("claude-draft-at-home", "claude", "\x1b[39m❯\u00a0DRAFTMARK", "draft"),
         )
         for name, provider, composer_line, expected in cases:
             with self.subTest(name=name):
@@ -395,24 +444,24 @@ class DashboardTests(unittest.TestCase):
                 ]
                 with mock.patch.object(ui.subprocess, "run", side_effect=results):
                     self.assertEqual(
-                        ui._ready_composer_is_empty(["tmux"], "%1", provider),
+                        ui._provider_composer_state_at_start(["tmux"], "%1", provider),
                         expected,
                     )
 
-    def test_progress_probe_refuses_ready_session_with_nonempty_draft(self):
-        row = make_row("ready-draft", "ready", "demo")
+    def test_progress_probe_refuses_ready_session_without_composer_start(self):
+        row = make_row("ready-no-composer", "ready", "demo")
         completed = subprocess.CompletedProcess
         results = [
             completed([], 0, stdout="1:0.0|0|0\n", stderr=""),
             completed([], 0, stdout="%dashboard\n", stderr=""),
-            completed([], 0, stdout="2|1\n", stderr=""),
-            completed([], 0, stdout="header\n\x1b[1m›\x1b[0m DRAFTMARK\n", stderr=""),
+            completed([], 0, stdout="", stderr=""),
+            completed([], 0, stdout="0|1\n", stderr=""),
         ]
         with mock.patch.object(ui.subprocess, "run", side_effect=results) as run:
             result = ui.probe_session_progress(row, timeout=1)
-        self.assertIn("not verifiably empty", result.error)
+        self.assertIn("could not be positioned safely", result.error)
         self.assertFalse(
-            any("send-keys" in call.args[0] for call in run.call_args_list)
+            any("-l" in call.args[0] for call in run.call_args_list)
         )
 
     def test_context_markdown_cleanup_keeps_values_and_drops_table_noise(self):

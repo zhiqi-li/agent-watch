@@ -2158,15 +2158,59 @@ def _capture_progress_pane(
     )
 
 
-def _ready_composer_is_empty(
-    base: Sequence[str], pane_id: str, provider: str
-) -> bool:
-    """Verify the provider's ready-state composer is visibly empty.
+def _progress_side_ui_visible(text: str, marker: str, provider: str) -> bool:
+    """Recognize the provider's temporary side-answer surface."""
+    plain = ANSI_RE.sub("", text)
+    lower = plain.casefold()
+    if marker in plain:
+        return True
+    if provider == "codex":
+        return "side" in lower and "ctrl+c" in lower and "exit" in lower
+    if provider == "claude":
+        return "space" in lower and "dismiss" in lower
+    return False
 
-    This check deliberately fails closed. A cursor at the prompt's first input
-    column is not enough because a user can move Home in a non-empty draft.
-    Codex distinguishes its empty placeholder with dim ANSI styling; Claude's
-    empty prompt line contains only its prompt glyph and whitespace.
+
+def _dismiss_progress_side_ui(
+    base: Sequence[str], pane_id: str, marker: str, provider: str
+) -> bool:
+    """Dismiss a side answer, retrying only while that surface is still visible."""
+    dismiss_key = "C-c" if provider == "codex" else "Space"
+    for _attempt in range(3):
+        # The final answer can be captured one frame before the side UI starts
+        # accepting navigation keys. Give it a short render cycle first.
+        time.sleep(0.15)
+        dismissed = subprocess.run(
+            list(base) + ["send-keys", "-t", pane_id, dismiss_key],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        if dismissed.returncode != 0:
+            return False
+        time.sleep(0.15)
+        capture = subprocess.run(
+            list(base) + ["capture-pane", "-p", "-J", "-t", pane_id],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        if capture.returncode != 0:
+            return False
+        if not _progress_side_ui_visible(capture.stdout, marker, provider):
+            return True
+    return False
+
+
+def _provider_composer_state_at_start(
+    base: Sequence[str], pane_id: str, provider: str
+) -> str:
+    """Return ``empty`` or ``draft`` when the cursor is at the composer start.
+
+    The provider prompt glyph prevents a Home key on a wrapped continuation
+    line from being mistaken for the beginning of a multiline composer.
     """
     cursor = subprocess.run(
         list(base)
@@ -2187,9 +2231,9 @@ def _ready_composer_is_empty(
             int(value) for value in cursor.stdout.strip().split("|", 1)
         )
     except (AttributeError, TypeError, ValueError):
-        return False
+        return ""
     if cursor.returncode != 0 or cursor_x != 2 or cursor_y < 0:
-        return False
+        return ""
 
     capture = subprocess.run(
         list(base) + ["capture-pane", "-e", "-p", "-t", pane_id],
@@ -2200,14 +2244,18 @@ def _ready_composer_is_empty(
     )
     lines = capture.stdout.splitlines() if capture.returncode == 0 else []
     if cursor_y >= len(lines):
-        return False
+        return ""
     line = lines[cursor_y]
     plain = ANSI_RE.sub("", line).replace("\u00a0", " ")
     if provider == "codex":
-        return plain.startswith("› ") and "\x1b[2m" in line
+        if not plain.startswith("› "):
+            return ""
+        return "empty" if "\x1b[2m" in line else "draft"
     if provider == "claude":
-        return plain.strip() == "❯"
-    return False
+        if not plain.startswith("❯"):
+            return ""
+        return "empty" if plain.strip() == "❯" else "draft"
+    return ""
 
 
 def _progress_prompt_is_draft(capture: str, prompt: str) -> bool:
@@ -2306,11 +2354,12 @@ def probe_session_progress(
 ) -> ProgressProbeResult:
     """Ask an eligible hidden Codex/Claude pane for a progress summary.
 
-    Running and auto-wait panes are eligible. Ready panes additionally require
-    a verified empty provider composer. The saved pane identity is validated,
-    and panes currently active in any tmux client are refused. The provider
-    answer is captured from its temporary side UI and is never retained in the
-    monitor database or provider transcript.
+    Running and auto-wait panes are eligible. For ready panes and panes active
+    in another tmux client, the cursor is first moved to a verified provider
+    composer start. An existing single-line draft becomes part of the temporary
+    question. The saved pane identity is validated. The provider answer is
+    captured from its temporary side UI and is never retained in the monitor
+    database or provider transcript.
     """
     session_key = str(row.get("session_key") or "")
     provider = str(row.get("provider") or "")
@@ -2361,22 +2410,32 @@ def probe_session_progress(
                 session_key=session_key,
                 error="Unable to verify whether the target pane is being viewed",
             )
-        if pane_id in {line.strip() for line in clients.stdout.splitlines()}:
-            return ProgressProbeResult(
-                session_key=session_key,
-                error="The target pane is active in another client; switch back to Agent Watch first",
+        active = pane_id in {line.strip() for line in clients.stdout.splitlines()}
+        state = str(row.get("state") or "")
+        composer_state = ""
+        if active or state == "ready":
+            position = subprocess.run(
+                base + ["send-keys", "-t", pane_id, "Home"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
             )
-
-        if str(row.get("state") or "") == "ready" and not _ready_composer_is_empty(
-            base, pane_id, provider
-        ):
-            return ProgressProbeResult(
-                session_key=session_key,
-                error="The ready session's provider composer is not verifiably empty",
-            )
+            if position.returncode == 0:
+                composer_state = _provider_composer_state_at_start(
+                    base, pane_id, provider
+                )
+            if not composer_state:
+                subject = "active pane" if active else "ready session"
+                return ProgressProbeResult(
+                    session_key=session_key,
+                    error=f"The {subject}'s provider composer could not be positioned safely",
+                )
 
         marker = "AWP" + secrets.token_hex(6).upper()
         prompt = _progress_prompt(marker)
+        if composer_state == "draft":
+            prompt += " "
         deadline = time.monotonic() + max(1.0, timeout)
         send = subprocess.run(
             base
@@ -2445,19 +2504,11 @@ def probe_session_progress(
                 )
             summary = parse_progress_capture(capture.stdout, marker, provider)
             if summary is not None:
-                # Current Codex uses a persistent side thread and documents
-                # Ctrl+C to return to the main thread. Claude uses Space to
-                # dismiss its temporary answer. The marker proves the answer is
-                # present before either provider-specific key is sent.
-                dismiss_key = "C-c" if provider == "codex" else "Space"
+                # The marker proves the answer is present before any
+                # provider-specific dismissal key is sent. Verify the side UI
+                # disappeared and retry only while it remains visible.
                 with contextlib.suppress(OSError, subprocess.SubprocessError):
-                    subprocess.run(
-                        base + ["send-keys", "-t", pane_id, dismiss_key],
-                        capture_output=True,
-                        text=True,
-                        timeout=2,
-                        check=False,
-                    )
+                    _dismiss_progress_side_ui(base, pane_id, marker, provider)
                 return ProgressProbeResult(
                     session_key=session_key, summary=summary
                 )

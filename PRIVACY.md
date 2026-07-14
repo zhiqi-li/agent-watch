@@ -120,8 +120,9 @@ authentication or a private server for sensitive work.
   appear on screen. The `p` key enables it only for the current UI process; avoid
   terminal recording and shared scrollback for sensitive sessions.
 - Use `b`/`B` only when sending the fixed progress question to those sessions and
-  displaying the returned summary is acceptable. Agent Watch refuses to type
-  into non-running panes or panes currently active in another tmux client.
+  displaying the returned summary is acceptable. Agent Watch refuses unsupported
+  states. In active or ready panes, an existing single-line draft is submitted as
+  part of the temporary question after the cursor is moved to the composer start.
 - `agent-watch status --json` is redacted by default. Treat `--full`, database
   rows, logs, screenshots, and bug reports as sensitive.
 - Review configured notification endpoints and their credentials regularly.
