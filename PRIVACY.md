@@ -40,7 +40,7 @@ outputs, but this is not a formal data-loss-prevention boundary.
 
 When the operator presses `b` or `B`, the dashboard sends a bounded `/btw`
 progress question to the selected running Codex/Claude tmux pane. The provider
-answer is captured from its temporary overlay and cached only in dashboard
+answer is captured from its temporary side UI and cached only in dashboard
 process memory. It is not added to the main provider transcript, written to
 SQLite, or included in notifications. This action invokes the configured model
 and may consume provider usage.

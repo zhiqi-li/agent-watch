@@ -374,7 +374,7 @@ outputs, but it is not a formal data-loss-prevention boundary.
 
 `/btw` progress snapshots are also held only in dashboard process memory. They
 are requested only after the operator presses `b` or `B`, briefly appear in the
-provider's dismissible side-answer overlay, and are not written to SQLite or
+provider's temporary side-answer surface, and are not written to SQLite or
 included in remote notifications.
 
 Remote notifications omit cwd, prompt/response excerpts, absolute tmux socket

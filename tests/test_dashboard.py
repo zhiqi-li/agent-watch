@@ -266,6 +266,13 @@ class DashboardTests(unittest.TestCase):
                 completed(
                     [],
                     0,
+                    stdout=f"› {ui._progress_prompt(marker)}\n  tab to queue message\n",
+                    stderr="",
+                ),
+                completed([], 0, stdout="", stderr=""),
+                completed(
+                    [],
+                    0,
                     stdout=(
                         f"{marker}|ship feature|parser done|render UI|run tests|none|END\n"
                     ),
@@ -289,7 +296,48 @@ class DashboardTests(unittest.TestCase):
             prompt = send_command[send_command.index("-l") + 1]
             self.assertTrue(prompt.startswith("/btw "))
             self.assertIn(marker, prompt)
-            self.assertEqual(run.call_args_list[-1].args[0][-1], "Space")
+            self.assertNotIn(";", send_command)
+            submit_command = run.call_args_list[4].args[0]
+            self.assertEqual(submit_command[-1], "Enter")
+            expected_dismiss = "C-c" if provider == "codex" else "Space"
+            self.assertEqual(run.call_args_list[-1].args[0][-1], expected_dismiss)
+
+    def test_progress_probe_clears_verified_draft_when_submit_fails(self):
+        completed = subprocess.CompletedProcess
+        marker = "AWP0123456789AB"
+        prompt = ui._progress_prompt(marker)
+        wrapped_prompt = prompt.replace("current|next", "current|\n  next")
+        row = make_row("codex-progress", "running", "codex")
+        results = [
+            completed([], 0, stdout="1:0.0|0|0\n", stderr=""),
+            completed([], 0, stdout="%dashboard\n", stderr=""),
+            completed([], 0, stdout="", stderr=""),
+            completed(
+                [],
+                0,
+                stdout=f"› {wrapped_prompt}\n  tab to queue message\n",
+                stderr="",
+            ),
+            completed([], 1, stdout="", stderr="submit failed"),
+            completed(
+                [],
+                0,
+                stdout=f"› {wrapped_prompt}\n  tab to queue message\n",
+                stderr="",
+            ),
+            completed([], 0, stdout="", stderr=""),
+        ]
+        with (
+            mock.patch.object(ui.secrets, "token_hex", return_value="0123456789ab"),
+            mock.patch.object(ui.subprocess, "run", side_effect=results) as run,
+        ):
+            result = ui.probe_session_progress(row, timeout=1, poll_seconds=0.01)
+        self.assertEqual(result.error, "submit failed")
+        cleanup_command = run.call_args_list[-1].args[0]
+        self.assertEqual(cleanup_command[-1], "BSpace")
+        self.assertEqual(
+            cleanup_command[cleanup_command.index("-N") + 1], str(len(prompt))
+        )
 
     def test_progress_probe_refuses_pane_visible_in_another_client(self):
         row = make_row("visible-progress", "running", "visible")

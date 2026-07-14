@@ -2134,6 +2134,64 @@ def _clean_progress_field(value: str) -> str:
     return sanitize(value.strip(" \t\r\n`'\""), 240)
 
 
+def _capture_progress_pane(
+    base: Sequence[str], pane_id: str
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        list(base)
+        + [
+            "capture-pane",
+            "-p",
+            "-J",
+            "-t",
+            pane_id,
+            "-S",
+            "-120",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=2,
+        check=False,
+    )
+
+
+def _progress_prompt_is_draft(capture: str, prompt: str) -> bool:
+    """Return whether the exact probe prompt is still visible in the composer."""
+    plain = ANSI_RE.sub("", capture)
+    # Provider TUIs insert display-only newlines (and sometimes indentation) at
+    # visual wrap boundaries even when tmux capture-pane uses -J.
+    compact_capture = re.sub(r"\s+", "", plain)
+    compact_prompt = re.sub(r"\s+", "", prompt)
+    return any(prefix + compact_prompt in compact_capture for prefix in ("›", ">"))
+
+
+def _clear_progress_prompt_draft(
+    base: Sequence[str], pane_id: str, prompt: str
+) -> None:
+    """Remove only a verified probe draft without interrupting the active turn."""
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        capture = _capture_progress_pane(base, pane_id)
+        if capture.returncode != 0 or not _progress_prompt_is_draft(
+            capture.stdout, prompt
+        ):
+            return
+        subprocess.run(
+            list(base)
+            + [
+                "send-keys",
+                "-t",
+                pane_id,
+                "-N",
+                str(len(prompt)),
+                "BSpace",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+
+
 def parse_progress_capture(
     text: str, marker: str, provider: str
 ) -> ProgressSummary | None:
@@ -2195,7 +2253,7 @@ def probe_session_progress(
 
     The query is deliberately limited to running panes. It validates the saved
     pane identity and refuses to type into a pane currently active in any tmux
-    client. The provider answer is captured from its ephemeral overlay and is
+    client. The provider answer is captured from its temporary side UI and is
     never written to the monitor database or provider transcript.
     """
     session_key = str(row.get("session_key") or "")
@@ -2254,6 +2312,8 @@ def probe_session_progress(
             )
 
         marker = "AWP" + secrets.token_hex(6).upper()
+        prompt = _progress_prompt(marker)
+        deadline = time.monotonic() + max(1.0, timeout)
         send = subprocess.run(
             base
             + [
@@ -2261,12 +2321,7 @@ def probe_session_progress(
                 "-t",
                 pane_id,
                 "-l",
-                _progress_prompt(marker),
-                ";",
-                "send-keys",
-                "-t",
-                pane_id,
-                "Enter",
+                prompt,
             ],
             capture_output=True,
             text=True,
@@ -2279,24 +2334,46 @@ def probe_session_progress(
                 error=sanitize(send.stderr, 200) or "Unable to send /btw to the pane",
             )
 
-        deadline = time.monotonic() + max(1.0, timeout)
-        while time.monotonic() < deadline:
-            capture = subprocess.run(
-                base
-                + [
-                    "capture-pane",
-                    "-p",
-                    "-J",
-                    "-t",
-                    pane_id,
-                    "-S",
-                    "-120",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=2,
-                check=False,
+        # Codex can drop Enter when tmux sends a long literal prompt and the key
+        # in the same input burst. Wait until the TUI has rendered this probe's
+        # unique marker before sending Enter as a separate terminal event.
+        rendered = False
+        render_deadline = min(deadline, time.monotonic() + 3.0)
+        while time.monotonic() < render_deadline:
+            capture = _capture_progress_pane(base, pane_id)
+            if capture.returncode != 0:
+                return ProgressProbeResult(
+                    session_key=session_key,
+                    error="The target pane disappeared while preparing /btw",
+                )
+            if marker in ANSI_RE.sub("", capture.stdout):
+                rendered = True
+                break
+            time.sleep(max(0.05, min(0.1, poll_seconds)))
+        if not rendered:
+            return ProgressProbeResult(
+                session_key=session_key,
+                error="The /btw prompt did not appear in the target pane",
             )
+
+        # Give the provider one terminal event cycle after its rendered frame.
+        time.sleep(max(0.05, min(0.1, poll_seconds)))
+        submit = subprocess.run(
+            base + ["send-keys", "-t", pane_id, "Enter"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        if submit.returncode != 0:
+            _clear_progress_prompt_draft(base, pane_id, prompt)
+            return ProgressProbeResult(
+                session_key=session_key,
+                error=sanitize(submit.stderr, 200) or "Unable to submit /btw",
+            )
+
+        while time.monotonic() < deadline:
+            capture = _capture_progress_pane(base, pane_id)
             if capture.returncode != 0:
                 return ProgressProbeResult(
                     session_key=session_key,
@@ -2304,12 +2381,14 @@ def probe_session_progress(
                 )
             summary = parse_progress_capture(capture.stdout, marker, provider)
             if summary is not None:
-                # Both providers document Space as a way to dismiss the side
-                # answer. The marker proves the answer overlay is present before
-                # this key is sent, avoiding an unsolicited key in the composer.
+                # Current Codex uses a persistent side thread and documents
+                # Ctrl+C to return to the main thread. Claude uses Space to
+                # dismiss its temporary answer. The marker proves the answer is
+                # present before either provider-specific key is sent.
+                dismiss_key = "C-c" if provider == "codex" else "Space"
                 with contextlib.suppress(OSError, subprocess.SubprocessError):
                     subprocess.run(
-                        base + ["send-keys", "-t", pane_id, "Space"],
+                        base + ["send-keys", "-t", pane_id, dismiss_key],
                         capture_output=True,
                         text=True,
                         timeout=2,
@@ -2324,9 +2403,10 @@ def probe_session_progress(
             session_key=session_key,
             error=sanitize(exc, 200) or "Unable to query session progress",
         )
+    _clear_progress_prompt_draft(base, pane_id, prompt)
     return ProgressProbeResult(
         session_key=session_key,
-        error="No /btw progress reply arrived; the provider may need an update",
+        error="No /btw progress reply arrived before the timeout",
     )
 
 
