@@ -354,19 +354,66 @@ class DashboardTests(unittest.TestCase):
             any("send-keys" in call.args[0] for call in run.call_args_list)
         )
 
-    def test_progress_probe_requires_running_supported_session(self):
-        self.assertEqual(
-            ui.progress_probe_availability(
-                make_row("claude-run", "running", "demo", "claude")
-            ),
-            "",
-        )
-        self.assertIn(
-            "only while",
-            ui.progress_probe_availability(make_row("ready", "ready", "demo")),
-        )
+    def test_progress_probe_allows_active_and_ready_supported_sessions(self):
+        for state in ("running", "auto_wait", "ready"):
+            with self.subTest(state=state):
+                self.assertEqual(
+                    ui.progress_probe_availability(
+                        make_row(f"claude-{state}", state, "demo", "claude")
+                    ),
+                    "",
+                )
+        for state in ("needs_input", "error"):
+            with self.subTest(state=state):
+                self.assertIn(
+                    "running, auto-wait, or ready",
+                    ui.progress_probe_availability(
+                        make_row(f"codex-{state}", state, "demo")
+                    ),
+                )
         unsupported = make_row("other", "running", "demo", "other")
         self.assertIn("Only Codex and Claude", ui.progress_probe_availability(unsupported))
+
+    def test_ready_composer_empty_check_distinguishes_placeholders_from_drafts(self):
+        completed = subprocess.CompletedProcess
+        cases = (
+            (
+                "codex-empty",
+                "codex",
+                "\x1b[1m›\x1b[0m \x1b[2mImprove documentation\x1b[0m",
+                True,
+            ),
+            ("codex-draft-at-home", "codex", "\x1b[1m›\x1b[0m DRAFTMARK", False),
+            ("claude-empty", "claude", "\x1b[39m❯\u00a0", True),
+            ("claude-draft-at-home", "claude", "\x1b[39m❯\u00a0DRAFTMARK", False),
+        )
+        for name, provider, composer_line, expected in cases:
+            with self.subTest(name=name):
+                results = [
+                    completed([], 0, stdout="2|1\n", stderr=""),
+                    completed([], 0, stdout=f"header\n{composer_line}\n", stderr=""),
+                ]
+                with mock.patch.object(ui.subprocess, "run", side_effect=results):
+                    self.assertEqual(
+                        ui._ready_composer_is_empty(["tmux"], "%1", provider),
+                        expected,
+                    )
+
+    def test_progress_probe_refuses_ready_session_with_nonempty_draft(self):
+        row = make_row("ready-draft", "ready", "demo")
+        completed = subprocess.CompletedProcess
+        results = [
+            completed([], 0, stdout="1:0.0|0|0\n", stderr=""),
+            completed([], 0, stdout="%dashboard\n", stderr=""),
+            completed([], 0, stdout="2|1\n", stderr=""),
+            completed([], 0, stdout="header\n\x1b[1m›\x1b[0m DRAFTMARK\n", stderr=""),
+        ]
+        with mock.patch.object(ui.subprocess, "run", side_effect=results) as run:
+            result = ui.probe_session_progress(row, timeout=1)
+        self.assertIn("not verifiably empty", result.error)
+        self.assertFalse(
+            any("send-keys" in call.args[0] for call in run.call_args_list)
+        )
 
     def test_context_markdown_cleanup_keeps_values_and_drops_table_noise(self):
         cleaned = ui.clean_context_text(

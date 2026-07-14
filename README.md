@@ -356,12 +356,13 @@ Enter action targets the exact pane. It fails closed when multiple tmux clients
 make the initiating client ambiguous, and it prints a manual attach command for
 a target on another tmux server.
 
-Press `b` to ask the selected running Codex or Claude session for a structured
-global progress snapshot, or `B` to query all eligible running sessions with at
-most three concurrent requests. Agent Watch validates the saved pane identity,
-refuses panes currently active in another tmux client, and sends the same
-temporary `/btw` prompt to both providers. Non-running sessions are not queried,
-which avoids typing into approval prompts or an idle composer draft.
+Press `b` to ask the selected eligible Codex or Claude session for a structured
+global progress snapshot, or `B` to query all eligible sessions with at most
+three concurrent requests. Running and auto-wait sessions are eligible; ready
+sessions are queried only after Agent Watch verifies that the provider composer
+is empty. Needs-input and error sessions remain blocked. Agent Watch also
+validates the saved pane identity, refuses panes currently active in another
+tmux client, and sends the same temporary `/btw` prompt to both providers.
 
 ## Privacy defaults
 
