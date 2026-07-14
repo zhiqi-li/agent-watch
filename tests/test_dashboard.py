@@ -235,6 +235,91 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(preview["tool"]["text"], "Bash")
             self.assertNotIn("UNIQUE_SECRET", serialized)
 
+    def test_progress_capture_is_provider_neutral_and_cleans_wrapped_borders(self):
+        marker = "AWPABC123"
+        capture = (
+            f"prompt ends with marker {marker}\n"
+            f"│ {marker} | 统一展示任务进度 | 完成解析层 │ | 编写 UI | "
+            "运行完整测试 | none | END │\n"
+        )
+        for provider in ("codex", "claude"):
+            with self.subTest(provider=provider):
+                summary = ui.parse_progress_capture(capture, marker, provider)
+                self.assertIsNotNone(summary)
+                assert summary is not None
+                self.assertEqual(summary.provider, provider)
+                self.assertEqual(summary.goal, "统一展示任务进度")
+                self.assertEqual(summary.done, "完成解析层")
+                self.assertEqual(summary.current, "编写 UI")
+                self.assertEqual(summary.next, "运行完整测试")
+                self.assertEqual(summary.blocker, "")
+
+    def test_progress_probe_supports_codex_and_claude_with_same_btw_protocol(self):
+        completed = subprocess.CompletedProcess
+        marker = "AWP0123456789AB"
+        for provider in ("codex", "claude"):
+            row = make_row(f"{provider}-progress", "running", provider, provider)
+            results = [
+                completed([], 0, stdout="1:0.0|0|0\n", stderr=""),
+                completed([], 0, stdout="%dashboard\n", stderr=""),
+                completed([], 0, stdout="", stderr=""),
+                completed(
+                    [],
+                    0,
+                    stdout=(
+                        f"{marker}|ship feature|parser done|render UI|run tests|none|END\n"
+                    ),
+                    stderr="",
+                ),
+                completed([], 0, stdout="", stderr=""),
+            ]
+            with (
+                self.subTest(provider=provider),
+                mock.patch.object(ui.secrets, "token_hex", return_value="0123456789ab"),
+                mock.patch.object(ui.subprocess, "run", side_effect=results) as run,
+            ):
+                result = ui.probe_session_progress(row, timeout=1, poll_seconds=0.01)
+            self.assertEqual(result.error, "")
+            self.assertIsNotNone(result.summary)
+            assert result.summary is not None
+            self.assertEqual(result.summary.provider, provider)
+            self.assertEqual(result.summary.current, "render UI")
+            send_command = run.call_args_list[2].args[0]
+            self.assertIn("send-keys", send_command)
+            prompt = send_command[send_command.index("-l") + 1]
+            self.assertTrue(prompt.startswith("/btw "))
+            self.assertIn(marker, prompt)
+            self.assertEqual(run.call_args_list[-1].args[0][-1], "Space")
+
+    def test_progress_probe_refuses_pane_visible_in_another_client(self):
+        row = make_row("visible-progress", "running", "visible")
+        completed = subprocess.CompletedProcess
+        results = [
+            completed([], 0, stdout="1:0.0|0|0\n", stderr=""),
+            completed([], 0, stdout="%1\n", stderr=""),
+        ]
+        with mock.patch.object(ui.subprocess, "run", side_effect=results) as run:
+            result = ui.probe_session_progress(row, timeout=1)
+        self.assertIn("active in another client", result.error)
+        self.assertEqual(run.call_count, 2)
+        self.assertFalse(
+            any("send-keys" in call.args[0] for call in run.call_args_list)
+        )
+
+    def test_progress_probe_requires_running_supported_session(self):
+        self.assertEqual(
+            ui.progress_probe_availability(
+                make_row("claude-run", "running", "demo", "claude")
+            ),
+            "",
+        )
+        self.assertIn(
+            "only while",
+            ui.progress_probe_availability(make_row("ready", "ready", "demo")),
+        )
+        unsupported = make_row("other", "running", "demo", "other")
+        self.assertIn("Only Codex and Claude", ui.progress_probe_availability(unsupported))
+
     def test_context_markdown_cleanup_keeps_values_and_drops_table_noise(self):
         cleaned = ui.clean_context_text(
             "### Results\n| model | score |\n|---|---:|\n| Muon | **77.04%** |\n"
@@ -400,6 +485,33 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("Enter to open this tmux session", rendered)
         self.assertIn("tmux prefix + L", rendered)
         self.assertIn("to return", rendered)
+
+    @unittest.skipUnless(ui.RICH_AVAILABLE, "rich unavailable")
+    def test_progress_summary_appears_in_list_and_detail(self):
+        from rich.console import Console
+
+        row = make_row("progress", "running", "progress")
+        view = ui.DashboardView(ui.DashboardSnapshot(sessions=[row]))
+        view.progress_summaries["progress"] = ui.ProgressSummary(
+            goal="Ship unified progress",
+            done="Provider parser complete",
+            current="Rendering dashboard",
+            next="Run tests",
+            blocker="",
+            provider="codex",
+            captured_at=time.time(),
+        )
+        output = io.StringIO()
+        console = Console(
+            file=output, width=140, height=38, force_terminal=False, color_system=None
+        )
+        console.print(ui.render_dashboard(view, 140, 38))
+        rendered = output.getvalue()
+        self.assertIn("Global progress", rendered)
+        self.assertIn("Ship unified progress", rendered)
+        self.assertIn("Provider parser complete", rendered)
+        self.assertIn("Rendering dashboard", rendered)
+        self.assertIn("Run tests", rendered)
 
     @unittest.skipUnless(ui.RICH_AVAILABLE, "rich unavailable")
     def test_help_explains_how_to_return_from_tmux_session(self):
@@ -1148,6 +1260,8 @@ class DashboardTests(unittest.TestCase):
         ui.handle_key(view, "escape", "", 10)
         self.assertFalse(view.searching)
         self.assertEqual(view.query, "")
+        self.assertEqual(ui.handle_key(view, "text", "b", 10), "progress")
+        self.assertEqual(ui.handle_key(view, "text", "B", 10), "progress_all")
         self.assertEqual(ui.handle_key(view, "text", "q", 10), "quit")
 
     def test_missing_database_is_read_only(self):

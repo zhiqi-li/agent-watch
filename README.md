@@ -35,6 +35,9 @@ prompts, paths, tmux locations, or other user data.
 - Shows the latest request, recent progress, and tool type in the wide-screen
   preview panel. Conversation preview is hidden by default and can be toggled
   temporarily with `p`.
+- Uses the shared `/btw` side-question command in Codex and Claude Code to fetch
+  an on-demand, provider-neutral global progress snapshot without adding it to
+  the main conversation. Press `b` for one running session or `B` for all.
 - Uses a SQLite outbox for deduplication and retries, with console, tmux,
   desktop, native Cursor/VS Code toasts, ntfy, Telegram, webhook, Bark, and
   custom-command delivery.
@@ -328,6 +331,7 @@ Up/Down or j/k   select an item        Enter             open selected item
 Esc              return from history  /                 search
 tmux prefix + L  return to Agent Watch
 f                cycle filters        g/G               first/last item
+b                selected progress    B                 all running progress
 p                show/hide preview    r                 refresh
 ?                help                 q                 close only the UI
 ```
@@ -352,6 +356,13 @@ Enter action targets the exact pane. It fails closed when multiple tmux clients
 make the initiating client ambiguous, and it prints a manual attach command for
 a target on another tmux server.
 
+Press `b` to ask the selected running Codex or Claude session for a structured
+global progress snapshot, or `B` to query all eligible running sessions with at
+most three concurrent requests. Agent Watch validates the saved pane identity,
+refuses panes currently active in another tmux client, and sends the same
+temporary `/btw` prompt to both providers. Non-running sessions are not queried,
+which avoids typing into approval prompts or an idle composer draft.
+
 ## Privacy defaults
 
 Agent Watch reads current-user process metadata, bounded tmux pane text, and
@@ -360,6 +371,11 @@ disabled by default. When enabled, it is generated only in dashboard memory and
 is not written to SQLite or sent in remote notifications. The preview is
 designed to omit reasoning, system instructions, tool arguments, and tool
 outputs, but it is not a formal data-loss-prevention boundary.
+
+`/btw` progress snapshots are also held only in dashboard process memory. They
+are requested only after the operator presses `b` or `B`, briefly appear in the
+provider's dismissible side-answer overlay, and are not written to SQLite or
+included in remote notifications.
 
 Remote notifications omit cwd, prompt/response excerpts, absolute tmux socket
 paths, and pane IDs unless the corresponding opt-in setting is enabled.
