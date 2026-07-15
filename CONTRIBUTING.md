@@ -78,11 +78,14 @@ records. Concurrency changes need tests with independent SQLite connections.
 Terminal changes need ANSI/control-character, CJK width, narrow-screen, and tmux
 ambiguity cases.
 
-Regenerate the README screenshot only from the committed synthetic fixture:
+Regenerate the README screenshots only from the committed synthetic fixtures:
 
 ```bash
 python scripts/render-demo.py
 ```
+
+This updates the live-triage, global-progress, recovery, and keyboard-workflow
+SVGs used by both READMEs and the static HTML showcase.
 
 Never capture a live dashboard for repository documentation.
 

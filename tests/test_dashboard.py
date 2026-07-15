@@ -84,10 +84,15 @@ class DashboardTests(unittest.TestCase):
         )
         self.assertEqual(environ["TERM"], "screen-256color")
 
-    def test_readme_screenshot_is_reproducible_synthetic_data(self):
-        committed = ROOT / "docs" / "agent-watch-demo.svg"
+    def test_readme_screenshots_are_reproducible_synthetic_data(self):
+        demos = {
+            "agent-watch-demo.svg": "checkout-api",
+            "agent-watch-progress-demo.svg": "Global&#160;progress",
+            "agent-watch-recovery-demo.svg": "Resume&#160;↵",
+            "agent-watch-shortcuts-demo.svg": "Keyboard&#160;shortcuts",
+        }
         with tempfile.TemporaryDirectory() as tmp:
-            generated = pathlib.Path(tmp) / "demo.svg"
+            generated = pathlib.Path(tmp) / "demos"
             run = subprocess.run(
                 [
                     sys.executable,
@@ -100,14 +105,28 @@ class DashboardTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(run.returncode, 0, run.stderr)
-            self.assertEqual(generated.read_bytes(), committed.read_bytes())
-        text = committed.read_text()
-        self.assertIn("checkout-api", text)
-        self.assertIn("Exited&#160;sessions", text)
-        self.assertNotIn("/root", text)
-        self.assertNotIn("zhiqi-li", text)
-        self.assertNotIn("cdnjs.cloudflare.com", text)
-        self.assertFalse(any("\u4e00" <= char <= "\u9fff" for char in text))
+            for filename in demos:
+                self.assertEqual(
+                    (generated / filename).read_bytes(),
+                    (ROOT / "docs" / filename).read_bytes(),
+                )
+        for filename, marker in demos.items():
+            with self.subTest(filename=filename):
+                text = (ROOT / "docs" / filename).read_text()
+                self.assertIn(marker, text)
+                self.assertNotIn("/root", text)
+                self.assertNotIn("zhiqi-li", text)
+                self.assertNotIn("cdnjs.cloudflare.com", text)
+                self.assertFalse(
+                    any("\u4e00" <= char <= "\u9fff" for char in text)
+                )
+
+        showcase = (ROOT / "docs" / "showcase.html").read_text()
+        for filename in demos:
+            self.assertIn(f'src="{filename}"', showcase)
+        self.assertIn('role="tablist"', showcase)
+        self.assertIn("prefers-reduced-motion", showcase)
+        self.assertFalse(any("\u4e00" <= char <= "\u9fff" for char in showcase))
 
     def test_snapshot_distinguishes_live_daemon_from_failed_scan(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -10,10 +10,39 @@
 Agent Watch 监控当前 Linux 或 macOS 用户拥有的 Codex CLI 和 Claude Code 会话。它提供
 终端仪表盘，并可在一轮结束、Agent 需要输入、运行失败或进程消失时发送提醒。
 
-![使用合成演示数据的 Agent Watch 终端仪表盘](agent-watch-demo.svg)
+<div align="center">
+  <a href="showcase.html">
+    <img src="agent-watch-demo.svg" width="100%" alt="Agent Watch 实时会话分诊面板" />
+  </a>
+  <p><strong>实时分诊</strong> · 多提供方、注意状态、停滞检测、本地预览、准确 tmux 跳转和通知健康度。</p>
+</div>
 
-截图由 [`scripts/render-demo.py`](../scripts/render-demo.py) 使用合成演示内容生成，不包含
-真实会话名、提示词、路径、tmux 位置或其他用户数据。
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="agent-watch-progress-demo.svg"><img src="agent-watch-progress-demo.svg" width="100%" alt="Agent Watch 全局进度面板" /></a>
+      <br /><strong>全局进度</strong><br />对一个或全部符合条件的会话统一展示 Goal、Done、Current、Next 和 Blocked。
+    </td>
+    <td width="50%" valign="top">
+      <a href="agent-watch-recovery-demo.svg"><img src="agent-watch-recovery-demo.svg" width="100%" alt="Agent Watch 退出会话恢复面板" /></a>
+      <br /><strong>安全恢复</strong><br />保留退出历史、展示不可恢复原因，并在全新的独立 tmux session 中恢复工作。
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="agent-watch-shortcuts-demo.svg"><img src="agent-watch-shortcuts-demo.svg" width="100%" alt="Agent Watch 键盘快捷操作面板" /></a>
+      <br /><strong>键盘工作流</strong><br />无需离开终端即可搜索、过滤、查看、查询进度、跳转、恢复和刷新。
+    </td>
+    <td width="50%" valign="top">
+      <a href="showcase.html"><strong>打开交互式 HTML 展示页 →</strong></a>
+      <br /><br />通过响应式标签页浏览完整面板和本地优先的监控能力。
+      <br /><br /><code>agent-watch ui</code>
+    </td>
+  </tr>
+</table>
+
+所有截图均由 [`scripts/render-demo.py`](../scripts/render-demo.py) 使用确定性的英文合成内容
+生成，不包含真实会话名、提示词、路径、tmux 位置或其他用户数据。
 
 ## 功能
 
