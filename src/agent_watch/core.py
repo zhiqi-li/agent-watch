@@ -69,6 +69,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "capture_lines": 80,
         "tmux_fallback_interval_seconds": 6.0,
         "tmux_fallback": True,
+        "auto_continue_model_capacity": True,
         "activity_stale_seconds": 600.0,
         "retention_days": 30.0,
         "process_exit_notifications": True,
@@ -142,6 +143,10 @@ CODEX_ROLLOUT_CACHE: dict[tuple[int, str], tuple[pathlib.Path, str]] = {}
 CODEX_LIFECYCLE_CACHE: dict[str, tuple[int, int, tuple[str, str, str]]] = {}
 CLAUDE_TRANSCRIPT_CACHE: dict[str, pathlib.Path] = {}
 PANE_CAPTURE_CACHE: dict[tuple[str, str], tuple[float, str]] = {}
+# Panes remain armed after one automatic recovery until the capacity message
+# disappears. This prevents a slow TUI repaint from submitting "continue"
+# more than once for the same error.
+CAPACITY_RECOVERY_ATTEMPTED: set[tuple[str, str]] = set()
 CURSOR_SOCKET_GENERATIONS: dict[str, tuple[int, int]] = {}
 CURSOR_PROMPT_LOADER: Any | None = None
 
@@ -216,6 +221,7 @@ def validate_config(config: Mapping[str, Any]) -> None:
     for key in (
         "notify_existing",
         "tmux_fallback",
+        "auto_continue_model_capacity",
         "process_exit_notifications",
     ):
         if not isinstance(monitor.get(key), bool):
@@ -1217,6 +1223,51 @@ def capture_pane(pane: Pane, lines: int = 80, min_interval: float = 0.0) -> str:
     if run.returncode == 0:
         PANE_CAPTURE_CACHE[cache_key] = (now, text)
     return text
+
+
+def auto_continue_model_capacity(pane: Pane, text: str) -> bool:
+    """Submit one ``continue`` for an active Codex model-capacity error."""
+    identity = (pane.socket_path, pane.pane_id)
+    tail = "\n".join(text.splitlines()[-16:])
+    capacity_error = re.search(
+        r"Selected\s+model\s+is\s+at\s+capacity\.\s*"
+        r"Please\s+try\s+a\s+different\s+model\.",
+        tail,
+        re.I,
+    )
+    if capacity_error is None:
+        CAPACITY_RECOVERY_ATTEMPTED.discard(identity)
+        return False
+    if identity in CAPACITY_RECOVERY_ATTEMPTED or pane_shows_running(text, "codex"):
+        return False
+
+    base = ["tmux"]
+    if pane.socket_path:
+        base += ["-S", pane.socket_path]
+    try:
+        typed = subprocess.run(
+            base + ["send-keys", "-t", pane.pane_id, "-l", "continue"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+        if typed.returncode != 0:
+            return False
+        # Once the text is in the composer, never type it a second time for the
+        # same visible error even if Enter fails or the pane repaints slowly.
+        CAPACITY_RECOVERY_ATTEMPTED.add(identity)
+        submitted = subprocess.run(
+            base + ["send-keys", "-t", pane.pane_id, "Enter"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    PANE_CAPTURE_CACHE.pop(identity, None)
+    return submitted.returncode == 0
 
 
 def pane_activity_id(text: str) -> str:
@@ -2558,10 +2609,20 @@ def scan_once(db: StateDB, config: Mapping[str, Any]) -> list[Observation]:
     capture_lines = int(monitor.get("capture_lines", 80))
     capture_interval = float(monitor.get("tmux_fallback_interval_seconds", 6.0))
     use_tmux = bool(monitor.get("tmux_fallback", True))
+    auto_continue_capacity = bool(monitor.get("auto_continue_model_capacity", True))
     observations: list[Observation] = []
     for proc in processes:
         active_panes = panes if use_tmux else []
         if proc.provider == "codex":
+            pane = pane_for_process(proc, active_panes)
+            if pane is not None and auto_continue_capacity:
+                pane_text = capture_pane(pane, capture_lines, capture_interval)
+                if auto_continue_model_capacity(pane, pane_text):
+                    print(
+                        f"[{iso_time()}] Codex model capacity recovery sent to "
+                        f"tmux {pane.target}",
+                        flush=True,
+                    )
             obs = codex_observation(proc, active_panes, capture_lines, capture_interval)
         else:
             obs = claude_observation(proc, active_panes, capture_lines, capture_interval)
