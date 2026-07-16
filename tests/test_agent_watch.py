@@ -320,6 +320,73 @@ class AgentWatchTests(unittest.TestCase):
         hit, _ = aw.pane_input_prompt("normal output\nWorking (12m 3s)\n")
         self.assertFalse(hit)
 
+    def test_capacity_error_is_automatically_continued_once(self):
+        pane = aw.Pane(
+            pane_id="%4",
+            session="work",
+            window="1",
+            index="0",
+            pid=100,
+            tty="/dev/pts/9",
+            command="codex",
+            cwd="/repo",
+            title="repo",
+            dead=False,
+            socket_path="/tmp/tmux-0/default",
+        )
+        text = (
+            "⚠ Selected model is at capacity. Please try a different model.\n"
+            "\n"
+            "› \n"
+        )
+        completed = subprocess.CompletedProcess([], 0)
+        aw.CAPACITY_RECOVERY_ATTEMPTED.clear()
+        with mock.patch.object(aw.subprocess, "run", return_value=completed) as run:
+            self.assertTrue(aw.auto_continue_model_capacity(pane, text))
+            self.assertFalse(aw.auto_continue_model_capacity(pane, text))
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(
+            run.call_args_list[0].args[0],
+            [
+                "tmux",
+                "-S",
+                "/tmp/tmux-0/default",
+                "send-keys",
+                "-t",
+                "%4",
+                "-l",
+                "continue",
+            ],
+        )
+        self.assertEqual(run.call_args_list[1].args[0][-1], "Enter")
+
+        self.assertFalse(aw.auto_continue_model_capacity(pane, "Working (2s)"))
+        with mock.patch.object(aw.subprocess, "run", return_value=completed) as run:
+            self.assertTrue(aw.auto_continue_model_capacity(pane, text))
+        self.assertEqual(run.call_count, 2)
+
+    def test_capacity_recovery_ignores_unrelated_pane_text(self):
+        pane = aw.Pane(
+            pane_id="%5",
+            session="work",
+            window="1",
+            index="1",
+            pid=101,
+            tty="/dev/pts/10",
+            command="codex",
+            cwd="/repo",
+            title="repo",
+            dead=False,
+        )
+        aw.CAPACITY_RECOVERY_ATTEMPTED.clear()
+        with mock.patch.object(aw.subprocess, "run") as run:
+            self.assertFalse(
+                aw.auto_continue_model_capacity(
+                    pane, "The selected model may have limited capacity today."
+                )
+            )
+        run.assert_not_called()
+
     def test_hook_mapping(self):
         obs = aw.hook_to_observation(
             "claude",

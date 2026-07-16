@@ -7,6 +7,10 @@ needs_input_repeat_seconds = 1800
 capture_lines = 80
 tmux_fallback_interval_seconds = 6
 tmux_fallback = true
+# When a Codex tmux pane reports that the selected model is at capacity, submit
+# "continue" once so Codex can retry with an available model. This requires
+# tmux_fallback to remain enabled.
+auto_continue_model_capacity = true
 # Mark a running session as "possibly stalled" in the UI after this many
 # seconds without terminal, rollout, or transcript activity.
 activity_stale_seconds = 600

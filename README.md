@@ -150,6 +150,7 @@ The primary configuration file is
 [monitor]
 interval_seconds = 5
 ready_delay_seconds = 12
+auto_continue_model_capacity = true
 activity_stale_seconds = 600
 retention_days = 30
 ignore_tmux_sessions = ["agent-watch"]
@@ -187,6 +188,9 @@ the default paths with `--config`, `--state-dir`, `AGENT_WATCH_CONFIG`, or
 `AGENT_WATCH_STATE_DIR`. `AGENT_WATCH_PERSIST_DIR` supplies the optional history
 backup directory and enables persistence without putting an installation-specific
 path in configuration. Restart the daemon after changing configuration.
+With the default `auto_continue_model_capacity = true`, a monitored Codex tmux
+pane that reports the selected model is at capacity receives one `continue`
+submission. Disable the option to keep Agent Watch strictly observational.
 
 By default, notification output stays on the local console and attached tmux
 clients. Network requests occur only for notification channels that you

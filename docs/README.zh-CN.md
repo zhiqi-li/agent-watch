@@ -129,6 +129,7 @@ agent-watch uninstall-hooks
 [monitor]
 interval_seconds = 5
 ready_delay_seconds = 12
+auto_continue_model_capacity = true
 activity_stale_seconds = 600
 retention_days = 30
 ignore_tmux_sessions = ["agent-watch"]
@@ -165,6 +166,9 @@ token = ""
 `--state-dir`、`AGENT_WATCH_CONFIG` 或 `AGENT_WATCH_STATE_DIR` 覆盖默认路径。修改
 配置后需要重启 daemon。`AGENT_WATCH_PERSIST_DIR` 可提供可选的历史备份目录；设置该
 变量会直接启用持久化，无需把某台机器的具体路径写进配置文件。
+默认启用 `auto_continue_model_capacity = true`：当受监控的 Codex tmux pane
+提示所选模型容量已满时，Agent Watch 会自动提交一次 `continue`。如需保持纯观察模式，
+可关闭此选项。
 
 默认通知只输出到本机 console 和已连接的 tmux 客户端。只有显式配置通知渠道才会产生
 网络请求。公共 ntfy 主题名可能相当于访问凭据；敏感环境应使用带认证的长随机主题或
